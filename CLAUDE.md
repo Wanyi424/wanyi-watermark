@@ -22,6 +22,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - 启发式评分算法选择无水印版本(优先 114 质量码)
   - 域名规范化和 HEAD 探测验证
 
+### 1.5 解析门面 (`resolver.py`) —— 单一事实源
+
+"按平台分发 + 自动识别 视频/图文 + 通用兜底" 的编排逻辑统一收敛在 `resolver.py`，
+由 **MCP 工具 / CLI / WebUI / Skill 四个消费方共同复用**：
+
+- `resolve_douyin` / `resolve_xiaohongshu` / `resolve_generic`：返回结构化 **dict**（与各 MCP 工具输出逐字一致）
+- `resolve_media`：顶层入口，按链接域名自动选平台（供 CLI/WebUI/Skill 的"单输入框"使用）
+- `detect_platform`：按域名判定 douyin / xiaohongshu / generic
+
+`server.py` 的工具均为薄包装：`json.dumps(resolve_*(...))`。
+转写逻辑统一在 `transcription.py`（`transcribe_video_url`，dashscope）。
+> 处理器在 resolver 内部**延迟导入**，保持 `import resolver` 轻量（不强依赖 dashscope/ffmpeg）。
+
 ### 2. MCP 服务器 (`server.py`)
 
 使用 FastMCP 框架提供统一的 MCP 接口:
@@ -59,13 +72,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # 启动 MCP 服务器(需要设置 DASHSCOPE_API_KEY 环境变量)
-python -m douyin_mcp_server
+python -m wanyi_watermark
 
 # 测试抖音链接解析(无需 API 密钥)
-python -m douyin_mcp_server.douyin_processor "<抖音分享链接>"
+python -m wanyi_watermark.douyin_processor "<抖音分享链接>"
 
 # 测试小红书链接解析(无需 API 密钥)
-python -m douyin_mcp_server.xiaohongshu_processor "<小红书分享链接>"
+python -m wanyi_watermark.xiaohongshu_processor "<小红书分享链接>"
+```
+
+### 交付渠道（CLI / WebUI / Skill）
+
+除 MCP 工具外，另提供三种面向人/脚本的交付渠道，均统一架在 `resolver` + `transcription` 之上：
+
+```bash
+# CLI：解析 / 下载 / 提取文案（支持抖音/小红书/通用，自动识别）
+python -m wanyi_watermark.cli -l "<分享链接>" -a info
+python -m wanyi_watermark.cli -l "<分享链接>" -a download -o ./output
+export DASHSCOPE_API_KEY="sk-xxx"
+python -m wanyi_watermark.cli -l "<分享链接>" -a extract -o ./output
+
+# WebUI：浏览器界面，默认 http://localhost:8080
+python web/app.py
+
+# Skill：见 wanyi-watermark-skill/SKILL.md（脚本 scripts/media_cli.py 为 CLI 薄封装）
 ```
 
 ### 安装依赖
@@ -75,7 +105,7 @@ python -m douyin_mcp_server.xiaohongshu_processor "<小红书分享链接>"
 pip install -e .
 
 # 使用 uv 运行(生产环境)
-uvx douyin-mcp-server
+uvx wanyi-watermark
 ```
 
 ### Claude Desktop 本地开发配置
@@ -83,15 +113,15 @@ uvx douyin-mcp-server
 ```json
 {
   "mcpServers": {
-    "douyin-mcp": {
+    "wanyi-watermark": {
       "command": "uv",
       "args": [
         "run",
         "--directory",
-        "/path/to/douyin-mcp-server",
+        "/path/to/wanyi-watermark",
         "python",
         "-m",
-        "douyin_mcp_server"
+        "wanyi_watermark"
       ],
       "env": {
         "DASHSCOPE_API_KEY": "your-api-key-here"
@@ -129,6 +159,18 @@ uvx douyin-mcp-server
 ### 请求头配置
 - 抖音使用移动端 UA (iPhone iOS 17_2)
 - 小红书优先使用桌面端 UA (Windows Chrome),失败时回退到移动端
+
+## 上游跟踪与延后/待回迁
+
+本仓基于上游 `douyin-mcp-server` 二开，采用 **「二开为主干 + 跟踪上游」** 策略。
+上游同步、文件映射表、待回迁 backlog、技术债清单统一记录在 **[`UPSTREAM_SYNC.md`](./UPSTREAM_SYNC.md)**。
+
+**本阶段【暂不实现】、已在代码内留 `TODO(upstream-backport, ...)` 的延后项：**
+- 硅基流动 SenseVoice 可选 ASR 后端 → `transcription.py`
+- 大文件自动分段转写 → `transcription.py`（注：百炼 URL 直传可能已原生支持长音频，需先验证）
+- 服务端下载代理（带 Referer 解决 403）→ `web/app.py`、`cli.py`
+
+改动上述方向前，请先阅读 `UPSTREAM_SYNC.md`。
 
 ## 代码结构设计原则
 

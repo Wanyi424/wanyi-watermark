@@ -404,12 +404,12 @@ class XiaohongshuProcessor:
 
 if __name__ == "__main__":
     # 便捷测试：
-    #   python -m douyin_mcp_server.xiaohongshu_processor "<xhs_url_or_text>"
-    #   python -m douyin_mcp_server.xiaohongshu_processor "<xhs_url_or_text>" --image
+    #   python -m wanyi_watermark.xiaohongshu_processor "<xhs_url_or_text>"
+    #   python -m wanyi_watermark.xiaohongshu_processor "<xhs_url_or_text>" --image
     import sys
 
     if len(sys.argv) < 2:
-        print("用法: python -m douyin_mcp_server.xiaohongshu_processor <小红书链接或文本> [--image]")
+        print("用法: python -m wanyi_watermark.xiaohongshu_processor <小红书链接或文本> [--image]")
         print("  默认: 解析视频笔记")
         print("  --image: 解析图文笔记")
         sys.exit(1)

@@ -182,13 +182,13 @@ pip install -e .
 
 ```bash
 # 启动服务器
-python -m douyin_mcp_server
+python -m wanyi_watermark
 
 # 测试抖音链接解析
-python -m douyin_mcp_server.douyin_processor "<抖音分享链接>"
+python -m wanyi_watermark.douyin_processor "<抖音分享链接>"
 
 # 测试小红书链接解析
-python -m douyin_mcp_server.xiaohongshu_processor "<小红书分享链接>"
+python -m wanyi_watermark.xiaohongshu_processor "<小红书分享链接>"
 ```
 
 ### Claude Desktop 本地开发配置
@@ -204,7 +204,7 @@ python -m douyin_mcp_server.xiaohongshu_processor "<小红书分享链接>"
         "/path/to/wanyi-watermark",
         "python",
         "-m",
-        "douyin_mcp_server"
+        "wanyi_watermark"
       ],
       "env": {
         "DASHSCOPE_API_KEY": "your-api-key-here"

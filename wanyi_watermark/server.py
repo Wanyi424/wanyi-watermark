@@ -10,14 +10,14 @@
 5. 通用平台兜底机制，支持未适配平台的链接解析
 
 ────────────────────────────────────────────────────────────────────
-⚠️ 重要设计约定（务必遵守，请勿改回“工具直接返回纯文本”）
+⚠️ 重要设计约定（务必遵守，请勿改回"工具直接返回纯文本"）
 ────────────────────────────────────────────────────────────────────
 本服务器所有解析类工具（parse_xhs_link / parse_douyin_link /
 parse_generic_link）一律【返回完整 JSON 字符串】，包含全部结构化字段
 （platform / type / title / caption / url / images 等），不得在工具
 内部就把结果拍平成纯文本。
 
-“纯文本（标题 / 文案 / 视频图片链接，禁止 Markdown、不省略不截断）”是
+"纯文本（标题 / 文案 / 视频图片链接，禁止 Markdown、不省略不截断）"是
 【LLM 回复最终用户时的展示格式】，由各工具 docstring 与
 watermark_removal_guide 提示词指示 LLM 完成，不是工具的返回值格式。
 
@@ -26,63 +26,39 @@ watermark_removal_guide 提示词指示 LLM 完成，不是工具的返回值格
 即：传给 LLM 的始终是包含全部数据的 JSON；只有 LLM 面向用户答复时才转纯文本。
 注：曾有改动把工具返回值直接改成纯文本（_format_plain_result），会丢失结构化
 字段、且与兜底/报错返回的 JSON 不一致，已回退；后续请保持工具返回 JSON。
+
+────────────────────────────────────────────────────────────────────
+架构说明：解析编排逻辑统一收敛在 resolver.py（单一事实源）
+────────────────────────────────────────────────────────────────────
+"按平台分发 + 自动识别视频/图文 + 通用兜底"的逻辑现位于 resolver.py，
+由 MCP 工具、CLI、WebUI、Skill 共同复用。下方工具均为薄包装：
+调用 resolver.resolve_* 取得结构化 dict，再 json.dumps 返回（行为不变）。
 """
 
 import os
-import re
 import json
-import requests
-import tempfile
-import asyncio
-from pathlib import Path
-from typing import Optional, Tuple
-import ffmpeg
-from tqdm.asyncio import tqdm
-from urllib import request
-from http import HTTPStatus
-import dashscope
+from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Context
 
-from .xiaohongshu_processor import XiaohongshuProcessor
+from .resolver import resolve_douyin, resolve_xiaohongshu, resolve_generic
 from .douyin_processor import DouyinProcessor
-from .generic_extractor import extract_generic_media
 
 # 创建 MCP 服务器实例
 mcp = FastMCP("百分百一键去水印",
               dependencies=["requests", "ffmpeg-python", "tqdm", "dashscope"])
 
-# 请求头，模拟移动端访问
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) EdgiOS/121.0.2277.107 Version/17.0 Mobile/15E148 Safari/604.1'
-}
-
-# 默认 API 配置
-DEFAULT_MODEL = "paraformer-v2"
-
 
 # ──────────────────────────────────────────────────────────────────
 # 输出格式约定（详见模块顶部 docstring，务必遵守）：
 #   • 下方所有 @mcp.tool 一律返回【完整 JSON】，不在工具内拍平成纯文本；
-#   • “纯文本展示（标题/文案/链接，禁止 Markdown、不截断）”是 LLM 回复
+#   • "纯文本展示（标题/文案/链接，禁止 Markdown、不截断）"是 LLM 回复
 #     用户时的格式，由各工具 docstring 与 watermark_removal_guide 指示
 #     LLM 完成，不是工具的返回值格式；
 #   • 数据流：工具 → 返回 JSON → LLM → 整理成纯文本 → 用户。
+#   • 编排逻辑在 resolver.py，本层仅 json.dumps 包装。
 # ──────────────────────────────────────────────────────────────────
-def _generic_fallback(share_link: str, reason: str) -> str:
-    """通用兜底逻辑：在专用解析失败时尝试通用提取。"""
-
-    try:
-        fallback_data = extract_generic_media(share_link)
-        fallback_data.setdefault("fallback_reason", reason)
-        return json.dumps(fallback_data, ensure_ascii=False, indent=2)
-    except Exception as fallback_error:
-        return json.dumps({
-            "status": "error",
-            "error": f"{reason}；兜底解析失败：{fallback_error}"
-        }, ensure_ascii=False, indent=2)
-
 @mcp.tool()
 def parse_xhs_link(share_link: str) -> str:
     """
@@ -102,49 +78,8 @@ def parse_xhs_link(share_link: str) -> str:
     - 若专用解析失败，将自动尝试 generic 兜底逻辑；调用方需同样按上述格式反馈结果
     - 抖音仅返回 caption 字段，标题需由调用方自行按需补充
     """
-    try:
-        processor = XiaohongshuProcessor()
+    return json.dumps(resolve_xiaohongshu(share_link), ensure_ascii=False, indent=2)
 
-        # 先尝试解析视频
-        try:
-            video_info = processor.parse_share_url(share_link)
-            return json.dumps({
-                "status": "success",
-                "type": "video",
-                "platform": "xiaohongshu",
-                "note_id": video_info.get("note_id", ""),
-                "title": video_info["title"],
-                "caption": video_info.get("desc", ""),
-                "url": video_info["url"],
-                "description": f"视频标题: {video_info['title']}"
-            }, ensure_ascii=False, indent=2)
-        except Exception as video_error:
-            # 如果视频解析失败，尝试图文解析
-            error_msg = str(video_error).lower()
-            if "未从页面中发现可用视频直链" in error_msg or "video" in error_msg or "候选" in error_msg:
-                try:
-                    note_data = processor.parse_image_note(share_link)
-                    return json.dumps({
-                        "status": "success",
-                        "type": "image",
-                        "platform": "xiaohongshu",
-                        "note_id": note_data["note_id"],
-                        "title": note_data["title"],
-                        "desc": note_data["desc"],
-                        "caption": note_data.get("desc", ""),
-                        "image_count": len(note_data["images"]),
-                        "images": note_data["images"],
-                        "format_info": {
-                            "webp": "轻量格式，体积小（约160KB），适合快速预览和节省带宽",
-                            "png": "无损格式，高质量（约1.8MB），支持透明背景，适合编辑和打印"
-                        }
-                    }, ensure_ascii=False, indent=2)
-                except Exception as image_error:
-                    return _generic_fallback(share_link, f"小红书图文解析失败: {image_error}")
-            return _generic_fallback(share_link, f"小红书视频解析失败: {video_error}")
-
-    except Exception as e:
-        return _generic_fallback(share_link, f"解析小红书链接失败: {e}")
 
 @mcp.tool()
 async def extract_douyin_text(
@@ -187,6 +122,7 @@ async def extract_douyin_text(
         ctx.error(f"处理过程中出现错误: {str(e)}")
         raise Exception(f"提取抖音视频文本失败: {str(e)}")
 
+
 # 注意：当前阶段仅在内部开发使用，尚无客户端依赖旧工具名，因此只保留统一的 parse_* 接口。
 # 若后续对外发布或有现网依赖，请考虑恢复旧名称的兼容包装以避免破坏现有集成。
 @mcp.tool()
@@ -208,43 +144,7 @@ def parse_douyin_link(share_link: str) -> str:
     - 若专用解析失败，将自动尝试 generic 兜底逻辑；调用方需同样按上述格式反馈结果
     - 抖音仅返回 caption 字段，标题需由调用方自行按需补充
     """
-    try:
-        processor = DouyinProcessor("")  # 获取资源不需要API密钥
-
-        # 先尝试解析视频
-        try:
-            video_info = processor.parse_share_url(share_link)
-            # 仅输出 caption 和资源链接，前端已确认无需 title 字段
-            return json.dumps({
-                "status": "success",
-                "type": "video",
-                "platform": "douyin",
-                "video_id": video_info["video_id"],
-                "caption": video_info.get("caption", ""),
-                "url": video_info["url"]
-            }, ensure_ascii=False, indent=2)
-        except Exception as video_error:
-            # 如果视频解析失败，检查是否为图文笔记
-            error_msg = str(video_error)
-            if "这是图文笔记" in error_msg:
-                try:
-                    note_data = processor.parse_image_note(share_link)
-                    # 图文同样只保留 caption，避免重复字段
-                    return json.dumps({
-                        "status": "success",
-                        "type": "image",
-                        "platform": "douyin",
-                        "note_id": note_data["note_id"],
-                        "caption": note_data.get("caption", ""),
-                        "image_count": len(note_data["images"]),
-                        "images": note_data["images"]
-                    }, ensure_ascii=False, indent=2)
-                except Exception as image_error:
-                    return _generic_fallback(share_link, f"抖音图文解析失败: {image_error}")
-            return _generic_fallback(share_link, f"抖音视频解析失败: {video_error}")
-
-    except Exception as e:
-        return _generic_fallback(share_link, f"解析抖音链接失败: {e}")
+    return json.dumps(resolve_douyin(share_link), ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
@@ -264,15 +164,8 @@ def parse_generic_link(share_link: str) -> str:
     - 请完整保留标题与文案的全部内容，不要省略或截断
     - 若未能解析，将返回错误说明（可能原因：页面无直链、需要登录等）
     """
-    try:
-        result = extract_generic_media(share_link)
-        result.setdefault("fallback_reason", "generic_tool_invocation")
-        return json.dumps(result, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "error": f"通用解析失败: {e}"
-        }, ensure_ascii=False, indent=2)
+    return json.dumps(resolve_generic(share_link), ensure_ascii=False, indent=2)
+
 
 @mcp.prompt()
 def watermark_removal_guide() -> str:
@@ -315,9 +208,9 @@ def watermark_removal_guide() -> str:
 ```json
 {
   "mcpServers": {
-    "douyin-mcp": {
+    "wanyi-watermark": {
       "command": "uvx",
-      "args": ["douyin-mcp-server"],
+      "args": ["wanyi-watermark"],
       "env": {
         "DASHSCOPE_API_KEY": "your-dashscope-api-key-here"
       }

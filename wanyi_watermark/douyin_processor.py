@@ -9,7 +9,9 @@ import requests
 from urllib import request as urlrequest
 from http import HTTPStatus
 import dashscope
-import ffmpeg
+# 注意：ffmpeg 仅在 extract_audio() 内按需延迟导入（见该方法），
+# 此处不在模块顶层导入，避免“解析/下载”等无需 ffmpeg 的链路（resolver / CLI）
+# 在未安装 ffmpeg 的环境下导入失败。
 from mcp.server.fastmcp import Context
 
 # 请求头，模拟移动端访问
@@ -311,12 +313,12 @@ class DouyinProcessor:
 
 if __name__ == "__main__":
     # 便捷测试：
-    #   python -m douyin_mcp_server.douyin_processor "<douyin_share_url_or_text>"
+    #   python -m wanyi_watermark.douyin_processor "<douyin_share_url_or_text>"
     import sys
     try:
         share = sys.argv[1]
     except IndexError:
-        print("用法: python -m douyin_mcp_server.douyin_processor <抖音链接或文本>")
+        print("用法: python -m wanyi_watermark.douyin_processor <抖音链接或文本>")
         raise SystemExit(1)
 
     p = DouyinProcessor("")  # 解析链接无需 API 密钥
