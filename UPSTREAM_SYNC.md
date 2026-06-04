@@ -28,33 +28,32 @@
 | 上游文件 | 二开对应 | 跟踪要点 |
 |----------|----------|----------|
 | `douyin_mcp_server/server.py`（处理器+工具，dashscope） | `wanyi_watermark/douyin_processor.py` + `server.py` + `resolver.py` | 抖音 `window._ROUTER_DATA` 解析若上游因页面改版而修复，需同步到 `douyin_processor.py`。二开已额外支持图文/超时，**领先于上游**。 |
-| `douyin-video/scripts/douyin_downloader.py`（CLI，硅基流动 + 大文件分段，仅抖音） | `wanyi_watermark/cli.py`（已重平台化：抖音/小红书/通用 + dashscope） | **未照搬**。其硅基流动后端与大文件分段属待回迁 backlog（见 §3）。 |
+| `douyin-video/scripts/douyin_downloader.py`（CLI，硅基流动 + 大文件分段，仅抖音） | `wanyi_watermark/cli.py` + `siliconflow_asr.py` + `transcription.py`（多平台 + 双后端） | 硅基流动后端与大文件分段已回迁并多平台化。 |
 | `web/app.py`（FastAPI WebUI） | `web/app.py`（端点改为统一走 `resolver`，多平台单输入框） | 上游 `/api/video/download` 服务端下载代理属待回迁 backlog（见 §3）。 |
 | `web/templates/index.html` | `web/templates/index.html`（多平台 + 图集 + 已做专业 UI/UX 重设计） | 功能须与上游对齐：解析/转写/下载/复制导出。 |
 | `douyin-video/SKILL.md` + `scripts/` | `wanyi-watermark-skill/SKILL.md` + `scripts/media_cli.py` | 已多平台化；脚本改为对包内 CLI 的薄封装。 |
 | `pyproject.toml`（fastapi/uvicorn/jinja2） | `pyproject.toml`（已同步增加同款依赖 + CLI 入口） | — |
 
 **二开独有（上游没有，勿被上游覆盖）：**
-`xiaohongshu_processor.py`、`generic_extractor.py`、`resolver.py`、`transcription.py`、
+`xiaohongshu_processor.py`、`generic_extractor.py`、`resolver.py`、`transcription.py`、`siliconflow_asr.py`、
 抖音图文解析（`douyin_processor.parse_image_note`）、工具精简合并（`parse_*_link` 自动识别 video/image + 兜底）。
 
 ---
 
 ## 3. 待回迁 backlog（本阶段【暂不实现】，已在代码内留 TODO）
 
-> 多数延后；其中 3.3「服务端下载代理」已在 WebUI 落地（见下）。每项标注：上游来源、价值、前置验证、代码内 TODO 位置。
+> 多数延后；其中 3.1/3.2 已落地、3.3「服务端下载代理」已在 WebUI 落地（见下）。每项标注：上游来源、价值、前置验证、代码内 TODO 位置。
 
-### 3.1 硅基流动 SenseVoice 作为可选 ASR 后端
+### 3.1 硅基流动 SenseVoice 作为可选 ASR 后端 —— ✅ 已落地
 - **上游来源**：`douyin-video/scripts/douyin_downloader.py` → `transcribe_single_audio()`
-- **价值**：多后端可切换，便于降本/容灾。
-- **前置验证**：设计 env 切换（dashscope ↔ siliconflow）。
-- **TODO 位置**：`wanyi_watermark/transcription.py` 顶部。
+- **已实现**：`wanyi_watermark/siliconflow_asr.py`（独立模块）+ `transcription.py`（双后端调度门面）
+- **切换方式**：环境变量 `ASR_BACKEND=siliconflow`，或 CLI `--backend`、WebUI 请求字段、MCP 也读取 `ASR_BACKEND`
+- **环境变量**：`SILICONFLOW_API_KEY`（硅基流动 API 密钥）
 
-### 3.2 大文件自动分段转写
-- **上游来源**：`douyin-video/scripts/douyin_downloader.py` → `split_audio()` / `extract_text_from_audio()`（>1h 或 >50MB 按 9min/段分割）
-- **价值**：长音频转写稳健性。
-- **前置验证**：**先确认阿里云百炼 paraformer-v2 的长音频上限**——百炼 URL 直传为服务端异步转写，很可能原生支持长音频，则本项对二开**可能并不需要**；仅在切到硅基流动时才必要。
-- **TODO 位置**：`wanyi_watermark/transcription.py` 顶部。
+### 3.2 大文件自动分段转写 —— ✅ 已落地（siliconflow 后端）
+- **上游来源**：`douyin-video/scripts/douyin_downloader.py` → `split_audio()` / `extract_text_from_audio()`
+- **已实现**：`siliconflow_asr.py` 内，>1h 或 >50MB 时自动按 540s/段 ffmpeg 分割 → 逐段转写 → 合并
+- **备注**：dashscope 后端仍为 URL 直传（百炼服务端原生支持长音频，无需客户端分段）
 
 ### 3.3 服务端下载代理（带 Referer，解决 403/跨域）—— ✅ 已落地（WebUI 侧）
 - **状态变更**：原标记延后；因实测小红书图片直链 `sns-webpic-qc.xhscdn.com` 直接 403 无法显示（前提已变），现已在 WebUI 正式落地通用媒体代理。
@@ -73,7 +72,7 @@
 |----|------|------|
 | xhs 视频→图文回退靠错误文案子串匹配 | 较脆弱，建议改为"基于页面数据结构判定" | `resolver.py: resolve_xiaohongshu`（已留 NOTE） |
 | 抖音/小红书输出字段不一致 | 抖音仅 `caption` 无 `title`，小红书有 `title`；属历史产品约定，如需统一须评估影响 | `resolver.py` |
-| `ffmpeg-python` 对当前工具面基本为死依赖 | 转写走 URL 直传，`extract_audio`/`download_video` 未被工具调用；如不接入硅基流动可考虑移除 | `pyproject.toml` / `douyin_processor.py` |
+| `ffmpeg-python` 现为 siliconflow 后端实际依赖 | 选择 siliconflow 后端时确需本地 ffmpeg；dashscope 链路仍不依赖 | `siliconflow_asr.py` |
 
 ---
 

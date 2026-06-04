@@ -31,7 +31,7 @@
 - 🔗 **智能链接解析** - 自动识别抖音/小红书分享链接,解析真实视频地址
 - 📹 **无水印视频提取** - 获取高清无水印视频直链,支持直接下载
 - 🖼️ **图片资源提取** - 支持图文笔记解析,提供多格式图片(WebP轻量/PNG高清)
-- 📝 **视频文本转写** - 基于AI语音识别,从视频中提取文字内容
+- 📝 **视频文本转写** - 基于AI语音识别,从视频中提取文字内容（支持阿里云百炼 / 硅基流动 SenseVoice 双后端）
 - 🌐 **通用平台兜底** - 遇到未适配平台时,自动尝试通用解析机制
 
 ### 技术特点
@@ -39,16 +39,18 @@
 - ✅ **链接解析无需密钥** - 视频/图片资源提取完全免费,无需任何 API 配置
 - ✅ **智能类型识别** - 自动判断内容类型(视频/图文),无需手动指定
 - ✅ **多格式支持** - 小红书图文提供 WebP(快速预览)和 PNG(高清编辑)双格式
-- ✅ **高精度文本转写** - 支持自定义 API 配置,默认使用 [阿里云百炼 API](https://help.aliyun.com/zh/model-studio/get-api-key?)
+- ✅ **高精度文本转写** - 支持阿里云百炼 (paraformer-v2) 与硅基流动 (SenseVoice) 双后端,通过环境变量或参数切换
 - ✅ **多平台兼容** - 支持抖音、小红书,并提供通用解析兜底机制
 
 ## 🚀 快速开始
 
 ### 步骤 1:获取 API 密钥
 
-前往 [阿里云百炼 API](https://help.aliyun.com/zh/model-studio/get-api-key?) 获取您的 `DASHSCOPE_API_KEY`:
+**方案 A（默认）**：前往 [阿里云百炼 API](https://help.aliyun.com/zh/model-studio/get-api-key?) 获取 `DASHSCOPE_API_KEY`
 
-![获取阿里云百炼API](https://files.mdnice.com/user/43439/36e658be-1ccf-41dd-87cf-d43fefde5c4e.png)
+**方案 B（可选）**：前往 [硅基流动](https://cloud.siliconflow.cn/) 获取 `SILICONFLOW_API_KEY`（需本地有 ffmpeg）
+
+> 链接解析和资源提取无需任何 API 密钥,仅文本转写功能需要。
 
 ### 步骤 2:配置环境变量
 
@@ -61,12 +63,16 @@
       "command": "uvx",
       "args": ["wanyi-watermark"],
       "env": {
-        "DASHSCOPE_API_KEY": "sk-xxxx"
+        "DASHSCOPE_API_KEY": "sk-xxxx",
+        "SILICONFLOW_API_KEY": "sk-xxxx (可选)",
+        "ASR_BACKEND": "dashscope"
       }
     }
   }
 }
 ```
+
+> `ASR_BACKEND` 可选 `dashscope`（默认,URL 直传无需 ffmpeg）或 `siliconflow`（需下载+ffmpeg 提取音频）。
 
 ### 步骤 3:开始使用
 
@@ -74,23 +80,17 @@
 
 ## ⚙️ API 配置说明
 
-### 当前版本(>= 1.2.0)
+### 转写后端选择（>= 1.2.0）
 
-最新版本默认使用阿里云百炼 API,具有以下优势:
-- ✅ 识别效果更好
-- ✅ 处理速度更快
-- ✅ 本地资源消耗更小
+| 后端 | 环境变量 | 优势 | 要求 |
+|------|----------|------|------|
+| **dashscope**（默认） | `DASHSCOPE_API_KEY` | URL 直传、无需本地 ffmpeg、服务端异步长音频 | 阿里云百炼 API |
+| siliconflow | `SILICONFLOW_API_KEY` | 支持离线模型、大文件自动分段(>1h/50MB) | 硅基流动 API + 本地 ffmpeg |
 
-**配置步骤:**
-1. 前往 [阿里云百炼](https://help.aliyun.com/zh/model-studio/get-api-key?) 开通 API 服务
-2. 获取 API Key 并配置到环境变量 `DASHSCOPE_API_KEY` 中
+通过 `ASR_BACKEND` 环境变量（或 CLI `--backend` / WebUI 请求字段）切换。优先级：显式参数 > 环境变量 > 默认 dashscope。
 
 
-> **注意**: `DASHSCOPE_API_KEY` 仅用于视频文本转写功能,链接解析和资源提取无需 API 密钥。
-
-### 获取 API 密钥(可选)
-
-如果需要使用视频文本转写功能,请前往 [阿里云百炼](https://help.aliyun.com/zh/model-studio/get-api-key) 获取 API 密钥。
+> **注意**: API 密钥仅用于视频文本转写功能,链接解析和资源提取无需密钥。
 
 ## 🛠️ 工具说明
 
@@ -146,10 +146,12 @@
 
 **参数:**
 - `share_link` (string): 抖音分享链接或包含链接的文本
-- `model` (string, 可选): 语音识别模型,默认使用 `paraformer-v2`
+- `model` (string, 可选): 语音识别模型,默认按后端自动选择
 
 **环境变量要求:**
-- `DASHSCOPE_API_KEY`: 阿里云百炼 API 密钥(必需)
+- `DASHSCOPE_API_KEY`: 阿里云百炼 API 密钥（默认后端）
+- `SILICONFLOW_API_KEY`: 硅基流动 API 密钥（可选后端）
+- `ASR_BACKEND`: 切换后端,可选 `dashscope` / `siliconflow`
 
 ## 📦 系统要求
 
@@ -207,7 +209,9 @@ python -m wanyi_watermark.xiaohongshu_processor "<小红书分享链接>"
         "wanyi_watermark"
       ],
       "env": {
-        "DASHSCOPE_API_KEY": "your-api-key-here"
+        "DASHSCOPE_API_KEY": "your-api-key-here",
+        "SILICONFLOW_API_KEY": "your-key-here (可选)",
+        "ASR_BACKEND": "dashscope"
       }
     }
   }

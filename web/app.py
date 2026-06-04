@@ -44,6 +44,7 @@ class ExtractRequest(BaseModel):
     url: str
     api_key: str = ""          # 可选，前端传入；缺省时用环境变量
     model: Optional[str] = None
+    backend: Optional[str] = None  # 'dashscope' | 'siliconflow'；缺省读 ASR_BACKEND 环境变量
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -55,9 +56,14 @@ async def index(request: Request):
 @app.get("/api/health")
 async def health_check() -> Dict[str, Any]:
     """健康检查 + 是否已在服务端配置 API Key。"""
+    ds = bool(os.getenv("DASHSCOPE_API_KEY", ""))
+    sf = bool(os.getenv("SILICONFLOW_API_KEY", ""))
     return {
         "status": "ok",
-        "api_key_configured": bool(os.getenv("DASHSCOPE_API_KEY", "")),
+        "api_key_configured": ds or sf,
+        "asr_backend_default": os.getenv("ASR_BACKEND", "dashscope"),
+        "dashscope_api_key_configured": ds,
+        "siliconflow_api_key_configured": sf,
     }
 
 
@@ -77,13 +83,20 @@ async def parse_link(req: ParseRequest) -> Dict[str, Any]:
 
 @app.post("/api/extract")
 async def extract_text(req: ExtractRequest) -> Dict[str, Any]:
-    """提取视频文案（需要 DASHSCOPE_API_KEY）。
+    """提取视频文案（需要对应后端的 API Key）。
 
-    流程：先解析链接得到视频直链 → 阿里云百炼转写。
+    流程：先解析链接得到视频直链 → 按 backend 选择转写后端。
     """
-    api_key = req.api_key or os.getenv("DASHSCOPE_API_KEY", "")
-    if not api_key:
-        return {"status": "error", "error": "请先配置 DASHSCOPE_API_KEY（阿里云百炼）"}
+    effective_backend = (req.backend or os.getenv("ASR_BACKEND", "dashscope")).lower()
+
+    if effective_backend == "siliconflow":
+        api_key = req.api_key or os.getenv("SILICONFLOW_API_KEY", "")
+        if not api_key:
+            return {"status": "error", "error": "请先配置 SILICONFLOW_API_KEY（硅基流动）"}
+    else:
+        api_key = req.api_key or os.getenv("DASHSCOPE_API_KEY", "")
+        if not api_key:
+            return {"status": "error", "error": "请先配置 DASHSCOPE_API_KEY（阿里云百炼）"}
 
     from wanyi_watermark.resolver import resolve_media
     from wanyi_watermark.transcription import transcribe_video_url
@@ -95,7 +108,9 @@ async def extract_text(req: ExtractRequest) -> Dict[str, Any]:
         return {"status": "error", "error": "文案提取仅支持视频类型链接"}
 
     try:
-        text = transcribe_video_url(data["url"], api_key=api_key, model=req.model)
+        text = transcribe_video_url(
+            data["url"], api_key=api_key, model=req.model, backend=req.backend
+        )
     except Exception as e:
         return {"status": "error", "error": f"文案提取失败: {e}"}
 
