@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "wanyi-watermark"
-version = "1.1.0"
+version = "1.2.0"
 description = "百分百一键去水印 - 视频链接解析与媒体资源提取MCP服务器，支持抖音/小红书/通用平台，附 CLI / WebUI / Skill 三种交付渠道"
 readme = "README.md"
 license = {text = "Apache-2.0"}

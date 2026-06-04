@@ -16,6 +16,9 @@ import os
 import sys
 import socket
 import ipaddress
+import logging
+import time
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse, urljoin, quote
@@ -23,12 +26,27 @@ from urllib.parse import urlparse, urljoin, quote
 # 将包根目录（mcp-server/）加入路径，便于直接 `python web/app.py` 运行
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from wanyi_watermark.diagnostics import (
+    parse_log,
+    reset_parse_trace,
+    set_parse_trace,
+    short_text,
+)
+
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import uvicorn
 import requests
+
+_LOG_LEVEL = getattr(logging, os.getenv("WANYI_WEB_LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logging.getLogger("wanyi_watermark").setLevel(_LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="百分百一键去水印", version="1.2.0")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -61,18 +79,62 @@ async def health_check() -> Dict[str, Any]:
     }
 
 
+def _resource_summary(data: Dict[str, Any]) -> str:
+    """生成解析结果资源摘要，仅用于日志。"""
+    if not isinstance(data, dict):
+        return "未知"
+    images = data.get("images")
+    if isinstance(images, list):
+        return f"{len(images)} 张图片"
+    if data.get("url"):
+        return "1 个视频/媒体直链"
+    return "0 个资源"
+
+
 @app.post("/api/parse")
-async def parse_link(req: ParseRequest) -> Dict[str, Any]:
+async def parse_link(req: ParseRequest, request: Request) -> Dict[str, Any]:
     """解析任意平台链接（无需 API Key），返回统一结构化结果。
 
     返回 resolver 的原始 dict（含 status / platform / type / title /
     caption / url / images 等），前端据此渲染。
     """
     from wanyi_watermark.resolver import resolve_media
+    trace_id = request.headers.get("X-Parse-Trace-Id") or uuid.uuid4().hex[:10]
+    tokens = set_parse_trace(trace_id)
+    flow_start = time.perf_counter()
+    parse_log(
+        logger,
+        "收到前端解析请求：输入长度=%d，内容预览=%s",
+        len(req.url or ""),
+        short_text(req.url),
+        flow_start=flow_start,
+    )
     try:
-        return resolve_media(req.url)
+        step = time.perf_counter()
+        data = resolve_media(req.url)
+        parse_log(
+            logger,
+            "统一解析返回：status=%s，platform=%s，type=%s，资源=%s",
+            data.get("status"),
+            data.get("platform"),
+            data.get("type"),
+            _resource_summary(data),
+            step_start=step,
+            flow_start=flow_start,
+        )
+        return data
     except Exception as e:
+        parse_log(
+            logger,
+            "解析接口异常：%s",
+            str(e),
+            flow_start=flow_start,
+            level=logging.ERROR,
+        )
         return {"status": "error", "error": str(e)}
+    finally:
+        parse_log(logger, "/api/parse 请求结束", flow_start=flow_start)
+        reset_parse_trace(tokens)
 
 
 @app.post("/api/extract")

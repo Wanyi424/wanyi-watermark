@@ -20,8 +20,11 @@
 
 import re
 import logging
+import time
 from typing import Dict
 from urllib.parse import urlparse
+
+from .diagnostics import parse_log
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +60,27 @@ def detect_platform(text: str) -> str:
 def _generic_fallback(share_link: str, reason: str) -> Dict:
     """通用兜底逻辑：在专用解析失败时尝试通用提取，返回结构化 dict。"""
     from .generic_extractor import extract_generic_media
+    fallback_start = time.perf_counter()
+    parse_log(logger, "进入通用兜底解析：原因=%s", reason)
     try:
         fallback_data = extract_generic_media(share_link)
         fallback_data.setdefault("fallback_reason", reason)
+        parse_log(
+            logger,
+            "通用兜底解析成功：type=%s，platform=%s",
+            fallback_data.get("type"),
+            fallback_data.get("platform"),
+            step_start=fallback_start,
+        )
         return fallback_data
     except Exception as fallback_error:
+        parse_log(
+            logger,
+            "通用兜底解析失败：%s",
+            str(fallback_error),
+            step_start=fallback_start,
+            level=logging.WARNING,
+        )
         return {
             "status": "error",
             "error": f"{reason}；兜底解析失败：{fallback_error}",
@@ -74,41 +93,57 @@ def resolve_douyin(share_link: str) -> Dict:
     返回 dict 结构与 MCP 工具 parse_douyin_link 完全一致（行为不变）。
     """
     from .douyin_processor import DouyinProcessor
+    flow_start = time.perf_counter()
+    parse_log(logger, "准备进入抖音专用解析")
     try:
+        step = time.perf_counter()
         processor = DouyinProcessor("")  # 获取资源不需要 API 密钥
+        parse_log(logger, "抖音处理器初始化完成", step_start=step, flow_start=flow_start)
 
-        # 先尝试解析视频
-        try:
-            video_info = processor.parse_share_url(share_link)
+        step = time.perf_counter()
+        parse_log(logger, "开始抖音统一解析（一次抓取后判断视频/图文）", flow_start=flow_start)
+        media_info = processor.parse_media(share_link)
+        parse_log(
+            logger,
+            "抖音统一解析成功：type=%s，id=%s",
+            media_info.get("type", ""),
+            media_info.get("video_id") or media_info.get("note_id"),
+            step_start=step,
+            flow_start=flow_start,
+        )
+
+        if media_info.get("type") == "video":
             # 仅输出 caption 和资源链接（沿用既有约定）
             return {
                 "status": "success",
                 "type": "video",
                 "platform": "douyin",
-                "video_id": video_info["video_id"],
-                "caption": video_info.get("caption", ""),
-                "url": video_info["url"],
+                "video_id": media_info["video_id"],
+                "caption": media_info.get("caption", ""),
+                "url": media_info["url"],
             }
-        except Exception as video_error:
-            # 视频解析失败，检查是否为图文笔记
-            error_msg = str(video_error)
-            if "这是图文笔记" in error_msg:
-                try:
-                    note_data = processor.parse_image_note(share_link)
-                    return {
-                        "status": "success",
-                        "type": "image",
-                        "platform": "douyin",
-                        "note_id": note_data["note_id"],
-                        "caption": note_data.get("caption", ""),
-                        "image_count": len(note_data["images"]),
-                        "images": note_data["images"],
-                    }
-                except Exception as image_error:
-                    return _generic_fallback(share_link, f"抖音图文解析失败: {image_error}")
-            return _generic_fallback(share_link, f"抖音视频解析失败: {video_error}")
+
+        if media_info.get("type") == "image":
+            return {
+                "status": "success",
+                "type": "image",
+                "platform": "douyin",
+                "note_id": media_info["note_id"],
+                "caption": media_info.get("caption", ""),
+                "image_count": len(media_info["images"]),
+                "images": media_info["images"],
+            }
+
+        return _generic_fallback(share_link, f"抖音统一解析得到未知类型: {media_info.get('type')}")
 
     except Exception as e:
+        parse_log(
+            logger,
+            "抖音解析外层异常，将进入通用兜底：%s",
+            str(e),
+            flow_start=flow_start,
+            level=logging.ERROR,
+        )
         return _generic_fallback(share_link, f"解析抖音链接失败: {e}")
 
 
@@ -118,50 +153,64 @@ def resolve_xiaohongshu(share_link: str) -> Dict:
     返回 dict 结构与 MCP 工具 parse_xhs_link 完全一致（行为不变）。
     """
     from .xiaohongshu_processor import XiaohongshuProcessor
+    flow_start = time.perf_counter()
+    parse_log(logger, "准备进入小红书专用解析")
     try:
+        step = time.perf_counter()
         processor = XiaohongshuProcessor()
+        parse_log(logger, "小红书处理器初始化完成", step_start=step, flow_start=flow_start)
 
-        # 先尝试解析视频
-        try:
-            video_info = processor.parse_share_url(share_link)
+        step = time.perf_counter()
+        parse_log(logger, "开始小红书统一解析（一次抓取后判断视频/图文）", flow_start=flow_start)
+        media_info = processor.parse_media(share_link)
+        parse_log(
+            logger,
+            "小红书统一解析成功：type=%s，note_id=%s",
+            media_info.get("type", ""),
+            media_info.get("note_id", ""),
+            step_start=step,
+            flow_start=flow_start,
+        )
+
+        if media_info.get("type") == "video":
             return {
                 "status": "success",
                 "type": "video",
                 "platform": "xiaohongshu",
-                "note_id": video_info.get("note_id", ""),
-                "title": video_info["title"],
-                "caption": video_info.get("desc", ""),
-                "url": video_info["url"],
-                "description": f"视频标题: {video_info['title']}",
+                "note_id": media_info.get("note_id", ""),
+                "title": media_info["title"],
+                "caption": media_info.get("desc", ""),
+                "url": media_info["url"],
+                "description": f"视频标题: {media_info['title']}",
             }
-        except Exception as video_error:
-            # 视频解析失败，尝试图文解析
-            # NOTE: 此处依赖错误信息子串匹配判断回退，较脆弱；
-            #       已登记到 UPSTREAM_SYNC.md 的技术债清单，后续以"页面数据结构判定"替代。
-            error_msg = str(video_error).lower()
-            if "未从页面中发现可用视频直链" in error_msg or "video" in error_msg or "候选" in error_msg:
-                try:
-                    note_data = processor.parse_image_note(share_link)
-                    return {
-                        "status": "success",
-                        "type": "image",
-                        "platform": "xiaohongshu",
-                        "note_id": note_data["note_id"],
-                        "title": note_data["title"],
-                        "desc": note_data["desc"],
-                        "caption": note_data.get("desc", ""),
-                        "image_count": len(note_data["images"]),
-                        "images": note_data["images"],
-                        "format_info": {
-                            "webp": "轻量格式，体积小（约160KB），适合快速预览和节省带宽",
-                            "png": "无损格式，高质量（约1.8MB），支持透明背景，适合编辑和打印",
-                        },
-                    }
-                except Exception as image_error:
-                    return _generic_fallback(share_link, f"小红书图文解析失败: {image_error}")
-            return _generic_fallback(share_link, f"小红书视频解析失败: {video_error}")
+
+        if media_info.get("type") == "image":
+            return {
+                "status": "success",
+                "type": "image",
+                "platform": "xiaohongshu",
+                "note_id": media_info["note_id"],
+                "title": media_info["title"],
+                "desc": media_info["desc"],
+                "caption": media_info.get("desc", ""),
+                "image_count": len(media_info["images"]),
+                "images": media_info["images"],
+                "format_info": {
+                    "webp": "轻量格式，体积小（约160KB），适合快速预览和节省带宽",
+                    "png": "无损格式，高质量（约1.8MB），支持透明背景，适合编辑和打印",
+                },
+            }
+
+        return _generic_fallback(share_link, f"小红书统一解析得到未知类型: {media_info.get('type')}")
 
     except Exception as e:
+        parse_log(
+            logger,
+            "小红书解析外层异常，将进入通用兜底：%s",
+            str(e),
+            flow_start=flow_start,
+            level=logging.ERROR,
+        )
         return _generic_fallback(share_link, f"解析小红书链接失败: {e}")
 
 
@@ -171,11 +220,28 @@ def resolve_generic(share_link: str) -> Dict:
     返回 dict 结构与 MCP 工具 parse_generic_link 完全一致。
     """
     from .generic_extractor import extract_generic_media
+    flow_start = time.perf_counter()
+    parse_log(logger, "准备进入通用平台解析")
     try:
+        step = time.perf_counter()
         result = extract_generic_media(share_link)
         result.setdefault("fallback_reason", "generic_tool_invocation")
+        parse_log(
+            logger,
+            "通用平台解析成功：type=%s",
+            result.get("type"),
+            step_start=step,
+            flow_start=flow_start,
+        )
         return result
     except Exception as e:
+        parse_log(
+            logger,
+            "通用平台解析失败：%s",
+            str(e),
+            flow_start=flow_start,
+            level=logging.WARNING,
+        )
         return {
             "status": "error",
             "error": f"通用解析失败: {e}",
@@ -188,11 +254,22 @@ def resolve_media(share_link: str) -> Dict:
     供 CLI / WebUI / Skill 使用（单输入框，任意平台链接皆可）。
     抖音 / 小红书内部已带通用兜底，未知平台直接走 generic。
     """
+    flow_start = time.perf_counter()
+    step = time.perf_counter()
     platform = detect_platform(share_link)
-    logger.debug("[resolver] 识别平台: %s", platform)
+    parse_log(logger, "平台识别完成：%s", platform, step_start=step, flow_start=flow_start)
 
     if platform == "douyin":
-        return resolve_douyin(share_link)
-    if platform == "xiaohongshu":
-        return resolve_xiaohongshu(share_link)
-    return resolve_generic(share_link)
+        result = resolve_douyin(share_link)
+    elif platform == "xiaohongshu":
+        result = resolve_xiaohongshu(share_link)
+    else:
+        result = resolve_generic(share_link)
+    parse_log(
+        logger,
+        "统一解析入口完成：status=%s，type=%s",
+        result.get("status"),
+        result.get("type"),
+        flow_start=flow_start,
+    )
+    return result

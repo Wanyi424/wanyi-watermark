@@ -16,7 +16,7 @@
 | 上游仓库 | yzfly/douyin-mcp-server |
 | 已参考版本 | **v1.4.0**（含 WebUI / Claude Skill / CLI / 硅基流动 ASR） |
 | 本地参考副本 | `server/douyin-mcp-server-origin/` |
-| 本仓版本 | wanyi-watermark v1.1.0 |
+| 本仓版本 | wanyi-watermark v1.2.0 |
 | 本次整合范围 | 引入 **CLI / WebUI / Skill** 三交付渠道（架在二开处理器之上） |
 
 ---
@@ -27,16 +27,16 @@
 
 | 上游文件 | 二开对应 | 跟踪要点 |
 |----------|----------|----------|
-| `douyin_mcp_server/server.py`（处理器+工具，dashscope） | `wanyi_watermark/douyin_processor.py` + `server.py` + `resolver.py` | 抖音 `window._ROUTER_DATA` 解析若上游因页面改版而修复，需同步到 `douyin_processor.py`。二开已额外支持图文/超时，**领先于上游**。 |
+| `douyin_mcp_server/server.py`（处理器+工具，dashscope） | `wanyi_watermark/douyin_processor.py` + `server.py` + `resolver.py` | 抖音 `window._ROUTER_DATA` 解析若上游因页面改版而修复，需同步到 `douyin_processor.py`。二开已额外支持 `parse_media` 一次判断视频/图文、超时与通用兜底，**领先于上游**。 |
 | `douyin-video/scripts/douyin_downloader.py`（CLI，硅基流动 + 大文件分段，仅抖音） | `wanyi_watermark/cli.py`（已重平台化：抖音/小红书/通用 + dashscope） | **未照搬**。其硅基流动后端与大文件分段属待回迁 backlog（见 §3）。 |
-| `web/app.py`（FastAPI WebUI） | `web/app.py`（端点改为统一走 `resolver`，多平台单输入框） | 上游 `/api/video/download` 服务端下载代理属待回迁 backlog（见 §3）。 |
-| `web/templates/index.html` | `web/templates/index.html`（多平台 + 图集 + 已做专业 UI/UX 重设计） | 功能须与上游对齐：解析/转写/下载/复制导出。 |
+| `web/app.py`（FastAPI WebUI） | `web/app.py`（端点改为统一走 `resolver`，多平台单输入框） | 已额外落地 `/api/proxy` 媒体代理和解析链路中文耗时日志。上游 `/api/video/download` 仅作参考。 |
+| `web/templates/index.html` | `web/templates/index.html`（多平台 + 图集 + 已做专业 UI/UX 重设计） | 已额外支持前端耗时日志、图集拖拽缩放灯箱、缩略图即时打开 + 高清图后台替换。功能仍须与上游对齐：解析/转写/下载/复制导出。 |
 | `douyin-video/SKILL.md` + `scripts/` | `wanyi-watermark-skill/SKILL.md` + `scripts/media_cli.py` | 已多平台化；脚本改为对包内 CLI 的薄封装。 |
 | `pyproject.toml`（fastapi/uvicorn/jinja2） | `pyproject.toml`（已同步增加同款依赖 + CLI 入口） | — |
 
 **二开独有（上游没有，勿被上游覆盖）：**
-`xiaohongshu_processor.py`、`generic_extractor.py`、`resolver.py`、`transcription.py`、
-抖音图文解析（`douyin_processor.parse_image_note`）、工具精简合并（`parse_*_link` 自动识别 video/image + 兜底）。
+`xiaohongshu_processor.py`、`generic_extractor.py`、`resolver.py`、`transcription.py`、`diagnostics.py`、
+抖音/小红书 `parse_media` 一次抓取后自动识别 video/image、工具精简合并（`parse_*_link` 自动识别 video/image + 兜底）。
 
 ---
 
@@ -65,13 +65,18 @@
 - **上游参考**：`web/app.py` → `GET /api/video/download`（流式 + Referer 头）。
 - **待跟进**：`wanyi_watermark/cli.py` 的下载仍直连源站（`DOWNLOAD_HEADERS`）；如遇 403 可改走相同的按域名 Referer 逻辑。
 
+### 3.4 解析诊断与 WebUI 图集预览 —— ✅ 已落地（二开侧）
+- **解析诊断**：`web/templates/index.html` 点击解析后生成 `X-Parse-Trace-Id`，浏览器 Console 输出中文耗时表；`web/app.py` 与 `wanyi_watermark/diagnostics.py` 在后端输出同一追踪 ID 的单步/累计耗时。
+- **平台解析优化**：抖音/小红书均新增 `parse_media`，已适配平台一次抓取页面后基于页面数据结构判断视频/图文，避免图文场景重复请求。
+- **小红书视频候选**：移除旧版 114 质量码改写与阻塞式 HEAD 探测；候选只做协议规范化与来源评分，优先使用页面提供的 `og:video` / `masterUrl`。
+- **图集灯箱**：支持拖拽、滚轮缩放、双指缩放和复位；打开时先复用已加载缩略图 `currentSrc`，后台加载 PNG/原图后无感替换。
+
 ---
 
 ## 4. 本仓技术债（整合窗口期可顺手治理，与上游无关）
 
 | 项 | 说明 | 位置 |
 |----|------|------|
-| xhs 视频→图文回退靠错误文案子串匹配 | 较脆弱，建议改为"基于页面数据结构判定" | `resolver.py: resolve_xiaohongshu`（已留 NOTE） |
 | 抖音/小红书输出字段不一致 | 抖音仅 `caption` 无 `title`，小红书有 `title`；属历史产品约定，如需统一须评估影响 | `resolver.py` |
 | `ffmpeg-python` 对当前工具面基本为死依赖 | 转写走 URL 直传，`extract_audio`/`download_video` 未被工具调用；如不接入硅基流动可考虑移除 | `pyproject.toml` / `douyin_processor.py` |
 

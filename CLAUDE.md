@@ -12,15 +12,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 项目采用处理器模式,每个平台有独立的处理器类:
 
-- **DouyinProcessor** (`douyin_processor.py`): 处理抖音视频
-  - 解析分享链接获取视频 ID 和无水印 URL
+- **DouyinProcessor** (`douyin_processor.py`): 处理抖音视频/图文
+  - `parse_media` 一次抓取页面后读取 `window._ROUTER_DATA`,自动判断视频或图文
+  - 视频提取无水印 URL;图文提取图片列表
   - 使用阿里云百炼 API (dashscope) 进行语音识别
   - 直接从视频 URL 进行转录(无需下载)
 
-- **XiaohongshuProcessor** (`xiaohongshu_processor.py`): 处理小红书视频
-  - 解析 HTML 页面提取视频直链
-  - 启发式评分算法选择无水印版本(优先 114 质量码)
-  - 域名规范化和 HEAD 探测验证
+- **XiaohongshuProcessor** (`xiaohongshu_processor.py`): 处理小红书视频/图文
+  - `parse_media` 一次抓取页面后解析最终 URL、`window.__INITIAL_STATE__`、视频流和图片列表
+  - 依据页面数据结构自动判断 `video` / `image`,避免"视频失败后再图文"的重复请求
+  - 视频直链优先使用页面提供的 `og:video` / `masterUrl`;不再进行旧版 114 质量码改写或阻塞式 HEAD 探测
+
+- **诊断日志** (`diagnostics.py`): 解析链路中文耗时日志
+  - WebUI 传入 `X-Parse-Trace-Id`,后端同一请求链路复用同一追踪 ID
+  - `parse_log` 输出单步耗时和累计耗时,用于定位页面请求、JSON 解析、候选筛选等卡点
 
 ### 1.5 解析门面 (`resolver.py`) —— 单一事实源
 
@@ -58,8 +63,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 3. 关键技术实现
 
 **视频 URL 解析:**
-- 抖音: 通过 `window._ROUTER_DATA` 提取 JSON 数据,替换 `playwm` 为 `play` 去水印
-- 小红书: 多重策略(video 标签、og:video meta、正则回退),启发式评分选择最优链接
+- 抖音: 通过 `window._ROUTER_DATA` 提取 JSON 数据,一次判断视频/图文;视频替换 `playwm` 为 `play` 去水印
+- 小红书: 一次抓取页面后结合最终 URL `type`、`window.__INITIAL_STATE__`、`og:video`、`masterUrl` / `backupUrls` 和图片列表判断类型并提取资源
+- 小红书视频候选只做协议规范化与来源评分,不再改写 114 质量码、不再做阻塞式 HEAD 探测
 
 **文本提取:**
 - 使用 dashscope.audio.asr.Transcription 异步 API
@@ -160,6 +166,12 @@ uvx wanyi-watermark
 - 抖音使用移动端 UA (iPhone iOS 17_2)
 - 小红书优先使用桌面端 UA (Windows Chrome),失败时回退到移动端
 
+### WebUI 诊断与预览
+- `web/app.py` 默认配置解析日志,可用 `WANYI_WEB_LOG_LEVEL` 调整级别。
+- `POST /api/parse` 读取前端 `X-Parse-Trace-Id`,与 `diagnostics.parse_log` 串联前后端耗时。
+- `web/templates/index.html` 的图集灯箱支持拖拽、滚轮缩放、双指缩放和复位。
+- 图集灯箱采用渐进式加载:先用已加载的缩略图 `currentSrc` 即时打开,再后台加载 PNG/原图并无感替换。
+
 ## 上游跟踪与延后/待回迁
 
 本仓基于上游 `douyin-mcp-server` 二开，采用 **「二开为主干 + 跟踪上游」** 策略。
@@ -168,7 +180,7 @@ uvx wanyi-watermark
 **本阶段【暂不实现】、已在代码内留 `TODO(upstream-backport, ...)` 的延后项：**
 - 硅基流动 SenseVoice 可选 ASR 后端 → `transcription.py`
 - 大文件自动分段转写 → `transcription.py`（注：百炼 URL 直传可能已原生支持长音频，需先验证）
-- 服务端下载代理（带 Referer 解决 403）→ `web/app.py`、`cli.py`
+- CLI 下载复用 WebUI 媒体代理/Referer 逻辑 → `cli.py`（WebUI 代理已落地）
 
 改动上述方向前，请先阅读 `UPSTREAM_SYNC.md`。
 

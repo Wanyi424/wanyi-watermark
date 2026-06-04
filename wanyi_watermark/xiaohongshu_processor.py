@@ -1,9 +1,13 @@
+import html
 import re
 import json
 import logging
 from typing import List, Optional, Tuple, Dict
+from urllib.parse import parse_qs, urlparse
 
 import requests
+
+from .diagnostics import parse_log, short_text
 
 
 # 专用于小红书页面抓取的 UA（桌面端优先，可避免强制 App 跳转）
@@ -55,8 +59,8 @@ class XiaohongshuProcessor:
 
     @staticmethod
     def _extract_note_id_from_path(url: str) -> Optional[str]:
-        # 形如 /explore/{note_id}
-        m = re.search(r"/explore/([a-z0-9]+)", url, re.IGNORECASE)
+        # 形如 /explore/{note_id} 或 /discovery/item/{note_id}
+        m = re.search(r"/(?:explore|discovery/item)/([a-z0-9]+)", url, re.IGNORECASE)
         return m.group(1) if m else None
 
     @staticmethod
@@ -78,16 +82,24 @@ class XiaohongshuProcessor:
     @staticmethod
     def _score_candidate(url: str, source: str) -> int:
         """为候选直链打分，分数越高越优先。
-        规则依据本次样本与常见页面行为：
-        - 优先来自 <video> DOM 的链接（更贴近实际播放流）
-        - 偏好末尾为 _114.mp4 或路径中含 /114/ 的版本（样本中该版本为无水印）
+        规则依据页面结构：
+        - 优先来自 <video> DOM 与 og:video 的链接（更贴近浏览器实际播放）
+        - 其次使用 __INITIAL_STATE__ 中的 masterUrl / backupUrls
         - 可扩展更多特征（如显式 wm 标识的负权重等）
         """
         score = 0
         if source == "video":
             score += 100
-        if re.search(r"/(114)/", url) or re.search(r"_114\.mp4($|\?)", url):
-            score += 50
+        elif source == "og":
+            score += 90
+        elif "master" in source:
+            score += 80
+        elif "backup" in source:
+            score += 60
+        elif source == "fallback":
+            score += 40
+        if url.startswith("https://"):
+            score += 10
         # 一些经验性负向特征（可按需扩展）
         if re.search(r"(?:wm|watermark)", url, re.IGNORECASE):
             score -= 40
@@ -110,66 +122,68 @@ class XiaohongshuProcessor:
                 pass
         return None
 
-    @staticmethod
-    def _force_quality_url(url: str, target: str = "114") -> str:
-        # 同时替换路径段与文件名中的质量码
-        url2 = re.sub(r"/([0-9]{2,4})/", f"/{target}/", url)
-        url2 = re.sub(r"_([0-9]{2,4})\.mp4", f"_{target}.mp4", url2)
-        return url2
-
-    @staticmethod
-    def _prefer_hs_domain(url: str) -> str:
-        # 将 sns-video-*.xhscdn.com 统一偏向 hs
-        return re.sub(r"https://sns-video-[a-z]+\.xhscdn\.com", "https://sns-video-hs.xhscdn.com", url)
-
-    def _probe_head_ok(self, url: str) -> bool:
-        try:
-            resp = requests.head(url, headers=HEADERS_XHS_PC, timeout=min(self.timeout, 6), allow_redirects=True)
-            return 200 <= resp.status_code < 400
-        except Exception:
-            return False
-
-
     def get_watermark_free_url(self, candidates: List[Tuple[str, str]]) -> str:
+        import time
+        flow_start = time.perf_counter()
+        parse_log(logger, "小红书视频开始筛选页面候选直链：候选数量=%d", len(candidates))
         if not candidates:
             raise ValueError("未从页面中发现可用视频直链")
-        # 1) 先规范域名，提取质量码
+        # 先规范协议，再按来源可靠性排序；不再进行域名/质量码改写和阻塞式二次网络探测。
+        step = time.perf_counter()
         normalized: List[Tuple[str, str, Optional[int]]] = []
         for url, source in candidates:
-            u = self._prefer_hs_domain(url)
+            u = self._ensure_https(self._normalize_media_url(url))
             q = self._extract_quality_code(u)
             normalized.append((u, source, q))
+        parse_log(logger, "小红书视频候选规范化完成：%d 个", len(normalized), step_start=step, flow_start=flow_start)
 
-        # 2) 如果存在 114，直接返回
-        for u, source, q in normalized:
-            if q == 114:
-                logger.debug(f"[小红书视频] 找到114质量码视频（无水印）")
-                return u
-
-        # 3) 否则选一个最靠谱的候选，尝试强制改成 114 并 HEAD 探测
+        step = time.perf_counter()
         best = sorted(
             normalized,
             key=lambda item: (self._score_candidate(item[0], item[1]) * -1, len(item[0])),
         )[0]
-        logger.debug(f"[小红书视频] 未找到114质量码，尝试转换URL（质量码: {best[2]}）")
-
-        forced = self._force_quality_url(best[0], "114")
-        if forced != best[0] and self._probe_head_ok(forced):
-            logger.debug(f"[小红书视频] URL转换成功，使用114版本")
-            return forced
-
-        # 4) 退回原始 best
-        logger.debug(f"[小红书视频] URL转换失败，使用原始候选（质量码: {best[2]}）")
+        parse_log(
+            logger,
+            "小红书视频候选筛选完成：来源=%s，质量码=%s",
+            best[1],
+            best[2],
+            step_start=step,
+            flow_start=flow_start,
+        )
         return best[0]
 
-    def _fetch_html(self, url: str) -> str:
+    def _fetch_page(self, url: str) -> Tuple[str, str]:
+        import time
         # 先尝试桌面 UA
+        step = time.perf_counter()
+        parse_log(logger, "小红书页面开始请求桌面 UA：%s", short_text(url))
         resp = requests.get(url, headers=HEADERS_XHS_PC, timeout=self.timeout, allow_redirects=True)
+        parse_log(
+            logger,
+            "小红书桌面 UA 请求完成：HTTP %s，最终地址=%s，HTML长度=%d",
+            resp.status_code,
+            short_text(resp.url),
+            len(resp.text or ""),
+            step_start=step,
+        )
         # 某些风控场景会返回 404 页，但仍含 SSR 内容；仅在完全失败时切换 UA
         if resp.status_code >= 500 or not resp.text:
+            step = time.perf_counter()
+            parse_log(logger, "小红书桌面 UA 结果不可用，开始移动 UA 回退")
             resp = requests.get(url, headers=HEADERS_XHS_MOBILE, timeout=self.timeout, allow_redirects=True)
+            parse_log(
+                logger,
+                "小红书移动 UA 回退完成：HTTP %s，最终地址=%s，HTML长度=%d",
+                resp.status_code,
+                short_text(resp.url),
+                len(resp.text or ""),
+                step_start=step,
+            )
         resp.raise_for_status()
-        return resp.text
+        return resp.url, resp.text
+
+    def _fetch_html(self, url: str) -> str:
+        return self._fetch_page(url)[1]
 
     def _extract_initial_state(self, html: str) -> Optional[dict]:
         """从 HTML 中提取 window.__INITIAL_STATE__ 数据"""
@@ -187,6 +201,251 @@ class XiaohongshuProcessor:
             return json.loads(json_str)
         except json.JSONDecodeError:
             return None
+
+    @staticmethod
+    def _share_type_from_url(url: str) -> str:
+        """从当次分享重定向 URL 中读取内容类型提示。"""
+        try:
+            values = parse_qs(urlparse(url).query).get("type", [])
+        except Exception:
+            return ""
+        return values[0].lower() if values else ""
+
+    def _note_from_state(self, state: Optional[dict], note_id: Optional[str]) -> Tuple[str, Dict]:
+        """从 __INITIAL_STATE__ 中取笔记详情；note_id 为空时取首个笔记。"""
+        note_map = ((state or {}).get("note") or {}).get("noteDetailMap") or {}
+        if not note_map:
+            raise ValueError("无法从页面中提取笔记数据")
+
+        if note_id and note_id in note_map:
+            chosen_id = note_id
+        else:
+            chosen_id = next(iter(note_map.keys()))
+
+        try:
+            note_info = note_map[chosen_id]["note"]
+        except (KeyError, TypeError) as e:
+            raise ValueError(f"解析笔记数据失败: {e}") from e
+        return chosen_id, note_info
+
+    @staticmethod
+    def _normalize_media_url(url: str) -> str:
+        return html.unescape(str(url or "")).replace("\\/", "/").strip()
+
+    @staticmethod
+    def _is_video_media_url(url: str) -> bool:
+        return bool(re.search(r"\.(?:mp4|m3u8)(?:\?|$)", url or "", re.IGNORECASE))
+
+    def _collect_video_candidates(
+        self,
+        html_text: str,
+        state: Optional[dict],
+        note_id: Optional[str],
+    ) -> List[Tuple[str, str]]:
+        """从同一份 HTML / state 中收集视频候选直链。"""
+        candidates: List[Tuple[str, str]] = []
+
+        for v in self._extract_all_video_src(html_text):
+            candidates.append((v, "video"))
+
+        ogv = self._extract_meta(html_text, "og:video") or self._extract_meta(html_text, "og:video:url")
+        if ogv:
+            candidates.append((ogv, "og"))
+
+        try:
+            resolved_note_id, note_info = self._note_from_state(state, note_id)
+            stream = (((note_info.get("video") or {}).get("media") or {}).get("stream") or {})
+            for codec, items in stream.items():
+                if not isinstance(items, list):
+                    continue
+                for idx, item in enumerate(items):
+                    if not isinstance(item, dict):
+                        continue
+                    master = item.get("masterUrl")
+                    if master:
+                        candidates.append((master, f"state_master_{codec}_{idx}"))
+                    for backup_idx, backup in enumerate(item.get("backupUrls") or []):
+                        candidates.append((backup, f"state_backup_{codec}_{idx}_{backup_idx}"))
+            parse_log(logger, "小红书 state 视频候选读取完成：note_id=%s", resolved_note_id)
+        except Exception:
+            pass
+
+        if not candidates:
+            for m in re.finditer(r"https?://[^\s'\"]+?\.(?:mp4|m3u8)(?:\?[^\s'\"]*)?", html_text, re.IGNORECASE):
+                if "xhscdn.com" in m.group(0):
+                    candidates.append((m.group(0), "fallback"))
+
+        seen = set()
+        normalized: List[Tuple[str, str]] = []
+        for url, source in candidates:
+            u = self._normalize_media_url(url)
+            if not self._is_video_media_url(u) or u in seen:
+                continue
+            seen.add(u)
+            normalized.append((u, source))
+        return normalized
+
+    def _build_image_note(self, note_id: str, note_info: Dict) -> Dict[str, any]:
+        """从已解析的笔记详情中构造图文结果。"""
+        import time
+        image_list = note_info.get("imageList", [])
+        if not image_list:
+            raise ValueError("笔记中没有找到图片")
+        parse_log(logger, "小红书图文数据读取完成：图片原始数量=%d", len(image_list))
+
+        step = time.perf_counter()
+        images = []
+        for img in image_list:
+            webp_url = None
+            if "infoList" in img:
+                for info in img["infoList"]:
+                    if info.get("imageScene") == "WB_DFT":
+                        webp_url = info.get("url")
+                        break
+
+            if not webp_url:
+                webp_url = img.get("urlDefault")
+
+            if webp_url:
+                webp_url = self._ensure_https(webp_url)
+                png_url = self._convert_image_url_to_png(webp_url)
+                images.append({
+                    "url_webp": webp_url,
+                    "url_png": png_url if png_url else webp_url,
+                    "width": img.get("width"),
+                    "height": img.get("height"),
+                })
+
+        if not images:
+            raise ValueError("无法提取图片URL")
+
+        title = note_info.get("title", f"xhs_{note_id}")
+        title = re.sub(r"[\\/:*?\"<>|]", "_", title).strip()
+        parse_log(logger, "小红书图文图片 URL 转换完成：有效图片=%d 张", len(images), step_start=step)
+
+        return {
+            "note_id": note_id,
+            "title": title,
+            "desc": note_info.get("desc", ""),
+            "type": "image",
+            "images": images,
+        }
+
+    def _build_video_note(
+        self,
+        html_text: str,
+        state: Optional[dict],
+        note_id: Optional[str],
+        note_info: Optional[Dict],
+    ) -> Dict[str, str]:
+        """从同一份页面数据中构造视频结果。"""
+        import time
+        step = time.perf_counter()
+        title = (
+            (note_info or {}).get("title")
+            or self._extract_meta(html_text, "og:title")
+            or self._extract_meta(html_text, "og:description", key="content")
+            or (f"xhs_{note_id}" if note_id else "xhs")
+        )
+        title = re.sub(r"[\\/:*?\"<>|]", "_", title).strip()
+        parse_log(logger, "小红书视频标题提取完成：标题长度=%d", len(title), step_start=step)
+
+        step = time.perf_counter()
+        candidates = self._collect_video_candidates(html_text, state, note_id)
+        parse_log(logger, "小红书视频候选直链扫描完成：%d 个", len(candidates), step_start=step)
+
+        step = time.perf_counter()
+        final_url = self.get_watermark_free_url(candidates)
+        parse_log(logger, "小红书视频最终直链筛选完成：%s", short_text(final_url), step_start=step)
+
+        return {
+            "url": final_url,
+            "title": title,
+            "note_id": note_id or "",
+            "desc": (note_info or {}).get("desc", ""),
+        }
+
+    def parse_media(self, share_text: str) -> Dict[str, any]:
+        """一次抓取页面后自动识别小红书视频或图文笔记。"""
+        import time
+        start_time = time.perf_counter()
+
+        share_url = self._extract_first_url(share_text)
+        parse_log(logger, "小红书统一解析开始：分享链接=%s", short_text(share_url))
+
+        step = time.perf_counter()
+        final_url, html_text = self._fetch_page(share_url)
+        parse_log(
+            logger,
+            "小红书统一解析页面获取完成：最终地址=%s，HTML长度=%d",
+            short_text(final_url),
+            len(html_text or ""),
+            step_start=step,
+        )
+
+        note_id = self._extract_note_id_from_path(final_url) or self._extract_note_id_from_path(share_url)
+        share_type = self._share_type_from_url(final_url)
+        parse_log(logger, "小红书统一解析基础信息：note_id=%s，type参数=%s", note_id or "未识别", share_type or "无")
+
+        step = time.perf_counter()
+        state = self._extract_initial_state(html_text)
+        parse_log(logger, "小红书统一解析 __INITIAL_STATE__ 处理完成：%s", "成功" if state else "未找到", step_start=step)
+
+        note_info: Optional[Dict] = None
+        if state:
+            try:
+                note_id, note_info = self._note_from_state(state, note_id)
+                parse_log(logger, "小红书统一解析笔记详情定位完成：note_id=%s", note_id)
+            except Exception as e:
+                parse_log(logger, "小红书统一解析笔记详情定位失败：%s", str(e), level=logging.WARNING)
+
+        stream = (((note_info or {}).get("video") or {}).get("media") or {}).get("stream") or {}
+        has_state_video = any(isinstance(items, list) and bool(items) for items in stream.values())
+        has_html_video = bool(self._extract_meta(html_text, "og:video") or self._extract_all_video_src(html_text))
+        has_images = bool((note_info or {}).get("imageList"))
+
+        prefer_video = share_type == "video" or (not share_type and (has_state_video or has_html_video))
+        prefer_image = share_type in ("normal", "image") or (not prefer_video and has_images)
+        parse_log(
+            logger,
+            "小红书统一解析类型判断完成：prefer_video=%s，prefer_image=%s，state_video=%s，html_video=%s，images=%s",
+            prefer_video,
+            prefer_image,
+            has_state_video,
+            has_html_video,
+            has_images,
+        )
+
+        errors = []
+        if prefer_video:
+            try:
+                result = self._build_video_note(html_text, state, note_id, note_info)
+                result["type"] = "video"
+                parse_log(logger, "小红书统一解析完成：视频", flow_start=start_time)
+                return result
+            except Exception as e:
+                errors.append(f"视频解析失败: {e}")
+                parse_log(logger, "小红书统一视频路径失败，尝试图文路径：%s", str(e), level=logging.WARNING)
+
+        if prefer_image or note_info:
+            try:
+                result = self._build_image_note(note_id or "", note_info or {})
+                parse_log(logger, "小红书统一解析完成：图文，图片=%d 张", len(result.get("images", [])), flow_start=start_time)
+                return result
+            except Exception as e:
+                errors.append(f"图文解析失败: {e}")
+                parse_log(logger, "小红书统一图文路径失败：%s", str(e), level=logging.WARNING)
+
+        if not prefer_video:
+            try:
+                result = self._build_video_note(html_text, state, note_id, note_info)
+                result["type"] = "video"
+                parse_log(logger, "小红书统一解析完成：视频", flow_start=start_time)
+                return result
+            except Exception as e:
+                errors.append(f"视频解析失败: {e}")
+
+        raise ValueError("；".join(errors) if errors else "未从页面中发现可用资源")
 
     @staticmethod
     def _ensure_https(url: str) -> str:
@@ -246,99 +505,10 @@ class XiaohongshuProcessor:
             ]
         }
         """
-        import time
-        start_time = time.time()
-
-        share_url = self._extract_first_url(share_text)
-        logger.debug(f"[小红书图文] 提取到的链接: {share_url}")
-
-        # 先请求获取重定向后的真实 URL（短链接需要重定向）
-        t1 = time.time()
-        resp = requests.get(share_url, headers=HEADERS_XHS_PC, timeout=self.timeout, allow_redirects=True)
-        logger.debug(f"[小红书图文] 页面请求耗时: {time.time()-t1:.2f}秒")
-
-        final_url = resp.url
-        html = resp.text
-
-        # 从真实 URL 中提取 note_id（支持 /explore/ 和 /discovery/item/ 两种路径）
-        note_match = re.search(r'/(?:explore|discovery/item)/([a-z0-9]+)', final_url)
-        if not note_match:
-            raise ValueError("无法从链接中提取笔记 ID")
-
-        note_id = note_match.group(1)
-        logger.debug(f"[小红书图文] Note ID: {note_id}")
-
-        # 提取 __INITIAL_STATE__ 数据
-        t2 = time.time()
-        data = self._extract_initial_state(html)
-        if not data:
-            raise ValueError("无法从页面中提取笔记数据")
-        logger.debug(f"[小红书图文] JSON解析耗时: {time.time()-t2:.2f}秒")
-
-        # 导航到笔记详情
-        try:
-            note_map = data['note']['noteDetailMap']
-            if note_id not in note_map:
-                raise KeyError(f"笔记 {note_id} 不在数据中")
-
-            note_info = note_map[note_id]['note']
-
-            # 提取图片列表
-            image_list = note_info.get('imageList', [])
-            if not image_list:
-                raise ValueError("笔记中没有找到图片")
-
-            # 处理图片 URL（同时提供 WebP 和 PNG 两种格式）
-            t3 = time.time()
-            images = []
-            for img in image_list:
-                # 优先从 infoList 中选择 WB_DFT
-                webp_url = None
-                if 'infoList' in img:
-                    for info in img['infoList']:
-                        if info.get('imageScene') == 'WB_DFT':
-                            webp_url = info.get('url')
-                            break
-
-                # 回退到 urlDefault
-                if not webp_url:
-                    webp_url = img.get('urlDefault')
-
-                if webp_url:
-                    # 确保 WebP URL 使用 HTTPS（避免混合内容问题）
-                    webp_url = self._ensure_https(webp_url)
-
-                    # 转换为 PNG URL（借鉴油猴脚本逻辑）
-                    png_url = self._convert_image_url_to_png(webp_url)
-
-                    # 同时保留两种格式
-                    images.append({
-                        'url_webp': webp_url,  # WebP 格式（体积小，适合预览）- HTTPS
-                        'url_png': png_url if png_url else webp_url,  # PNG 格式（无损高清）- HTTPS
-                        'width': img.get('width'),
-                        'height': img.get('height')
-                    })
-
-            # 清理标题中的非法字符
-            title = note_info.get('title', f'xhs_{note_id}')
-            title = re.sub(r"[\\/:*?\"<>|]", "_", title).strip()
-
-            logger.debug(f"[小红书图文] 图片URL处理耗时: {time.time()-t3:.2f}秒")
-
-            total_time = time.time() - start_time
-            logger.debug(f"[小红书图文] 解析完成，总耗时: {total_time:.2f}秒，图片数量: {len(images)}")
-            logger.debug(f"{'='*60}\n")
-
-            return {
-                'note_id': note_id,
-                'title': title,
-                'desc': note_info.get('desc', ''),
-                'type': 'image',
-                'images': images
-            }
-
-        except (KeyError, TypeError) as e:
-            raise ValueError(f"解析笔记数据失败: {str(e)}")
+        data = self.parse_media(share_text)
+        if data.get("type") != "image":
+            raise ValueError("该链接不是图文笔记")
+        return data
 
     def parse_share_url(self, share_text: str) -> Dict[str, str]:
         """解析小红书分享链接，返回视频信息：url/title/note_id
@@ -347,60 +517,10 @@ class XiaohongshuProcessor:
         - 从 HTML 中抓取 <video src> 与 <meta og:video>
         - 通过启发式评分选择无水印直链
         """
-        import time
-        start_time = time.time()
-
-        share_url = self._extract_first_url(share_text)
-        logger.debug(f"[小红书视频] 提取到的链接: {share_url}")
-
-        note_id = self._extract_note_id_from_path(share_url)
-
-        t1 = time.time()
-        html = self._fetch_html(share_url)
-        logger.debug(f"[小红书视频] 页面请求耗时: {time.time()-t1:.2f}秒")
-
-        # 标题：优先 og:title
-        title = (
-            self._extract_meta(html, "og:title")
-            or self._extract_meta(html, "og:description", key="content")
-            or (f"xhs_{note_id}" if note_id else "xhs")
-        )
-        # 清理非法文件名字符
-        title = re.sub(r"[\\/:*?\"<>|]", "_", title).strip()
-
-        # 候选直链
-        candidates: List[Tuple[str, str]] = []
-        # 1) video 标签
-        for v in self._extract_all_video_src(html):
-            candidates.append((v, "video"))
-        # 2) og:video
-        ogv = self._extract_meta(html, "og:video")
-        if ogv:
-            candidates.append((ogv, "og"))
-
-        if not candidates:
-            # 兜底：尝试在页面里扫所有以 xhscdn.com 结尾的 mp4
-            for m in re.finditer(r"https?://[^\s'\"]+?\.mp4", html, re.IGNORECASE):
-                if "xhscdn.com" in m.group(0):
-                    candidates.append((m.group(0), "fallback"))
-
-        logger.debug(f"[小红书视频] 找到 {len(candidates)} 个候选视频URL")
-
-        t2 = time.time()
-        final_url = self.get_watermark_free_url(candidates)
-        logger.debug(f"[小红书视频] URL筛选耗时: {time.time()-t2:.2f}秒")
-
-        total_time = time.time() - start_time
-        logger.debug(f"[小红书视频] 解析完成，总耗时: {total_time:.2f}秒")
-        logger.debug(f"{'='*60}\n")
-
-        return {
-            "url": final_url,
-            "title": title,
-            "note_id": note_id or "",
-        }
-
-
+        data = self.parse_media(share_text)
+        if data.get("type") != "video":
+            raise ValueError("该链接不是视频笔记")
+        return data
 
 if __name__ == "__main__":
     # 便捷测试：

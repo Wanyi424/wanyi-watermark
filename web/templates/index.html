@@ -464,11 +464,32 @@
         .copy-fallback-ta:focus { border-color: var(--brand); background: #fff; box-shadow: var(--ring); }
 
         /* 灯箱 */
-        .lightbox { display: none; position: fixed; inset: 0; z-index: 80; background: rgba(15,20,18,.9); padding: 28px; cursor: zoom-out; }
-        .lightbox.show { display: grid; place-items: center; animation: fadeIn .18s var(--ease); }
-        .lightbox img { max-width: 100%; max-height: 100%; border-radius: var(--r-md); box-shadow: var(--sh-lg); }
-        .lightbox .lb-close { position: fixed; top: 20px; right: 22px; width: 42px; height: 42px; border-radius: 50%; background: rgba(255,255,255,.15); color: #fff; border: none; cursor: pointer; font-size: 17px; display: grid; place-items: center; backdrop-filter: blur(6px); transition: background .15s; }
+        body.lb-open { overflow: hidden; }
+        .lightbox { display: none; position: fixed; inset: 0; z-index: 80; background: rgba(15,20,18,.92); }
+        .lightbox.show { display: block; animation: fadeIn .18s var(--ease); }
+        .lb-stage {
+            position: absolute; inset: 0; overflow: hidden; touch-action: none;
+            cursor: grab; user-select: none;
+        }
+        .lb-stage.dragging { cursor: grabbing; }
+        .lightbox img {
+            position: absolute; left: 0; top: 0; max-width: none; max-height: none;
+            border-radius: var(--r-md); box-shadow: var(--sh-lg); transform-origin: 0 0;
+            will-change: transform; user-select: none; -webkit-user-drag: none;
+        }
+        .lightbox .lb-close { position: fixed; top: 20px; right: 22px; z-index: 2; width: 42px; height: 42px; border-radius: 50%; background: rgba(255,255,255,.15); color: #fff; border: none; cursor: pointer; font-size: 17px; display: grid; place-items: center; backdrop-filter: blur(6px); transition: background .15s; }
         .lightbox .lb-close:hover { background: rgba(255,255,255,.28); }
+        .lb-tools {
+            position: fixed; right: 22px; bottom: 22px; z-index: 2; display: flex; gap: 8px;
+            padding: 6px; border-radius: var(--r-pill); background: rgba(255,255,255,.12);
+            backdrop-filter: blur(8px); box-shadow: 0 10px 30px rgba(0,0,0,.22);
+        }
+        .lb-tool {
+            width: 38px; height: 38px; border-radius: 50%; border: none; cursor: pointer;
+            display: grid; place-items: center; color: #fff; background: rgba(255,255,255,.14);
+            font-size: 14px; transition: background .15s;
+        }
+        .lb-tool:hover { background: rgba(255,255,255,.26); }
 
         /* Toast */
         .toast-wrap { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
@@ -654,9 +675,16 @@
     <div class="dl-menu" id="dlMenu" role="menu" aria-label="选择下载格式"></div>
 
     <!-- 灯箱 -->
-    <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+    <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="图片预览">
         <button class="lb-close" onclick="closeLightbox()" aria-label="关闭预览"><i class="fa-solid fa-xmark"></i></button>
-        <img id="lightboxImg" src="" alt="图片预览">
+        <div class="lb-stage" id="lightboxStage">
+            <img id="lightboxImg" src="" alt="图片预览" draggable="false">
+        </div>
+        <div class="lb-tools" aria-label="图片缩放控制">
+            <button type="button" class="lb-tool" id="lbZoomOut" title="缩小" aria-label="缩小"><i class="fa-solid fa-minus"></i></button>
+            <button type="button" class="lb-tool" id="lbZoomReset" title="适应屏幕" aria-label="适应屏幕"><i class="fa-solid fa-compress"></i></button>
+            <button type="button" class="lb-tool" id="lbZoomIn" title="放大" aria-label="放大"><i class="fa-solid fa-plus"></i></button>
+        </div>
     </div>
 
     <div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
@@ -670,12 +698,80 @@
         let lastTranscript = "";
         let lastTranscriptTitle = "";
         let galleryImages = [];   // 当前图集（供下载菜单 / 一键下载全部使用）
+        const lightboxState = {
+            scale: 1,
+            minScale: 1,
+            maxScale: 6,
+            x: 0,
+            y: 0,
+            pointers: new Map(),
+            dragStart: null,
+            pinchStart: null,
+            loadId: 0,
+        };
 
         const $ = (id) => document.getElementById(id);
         const PLATFORM_LABEL = { douyin: "抖音", xiaohongshu: "小红书", generic: "通用平台" };
         const PLATFORM_ICON  = { douyin: "fa-brands fa-tiktok", xiaohongshu: "fa-solid fa-book-open", generic: "fa-solid fa-globe" };
 
         /* ---------- 工具 ---------- */
+        function fmtDuration(ms) {
+            if (!Number.isFinite(ms)) return "-";
+            return ms >= 1000 ? (ms / 1000).toFixed(2) + "s" : Math.round(ms) + "ms";
+        }
+        function firstUrl(text) {
+            const m = String(text || "").match(/https?:\/\/[^\s"'，。、）)】>]+/);
+            return m ? m[0] : "";
+        }
+        function shortPreview(text, limit) {
+            const s = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+            return s.length > limit ? s.slice(0, limit) + "..." : s;
+        }
+        function resultResourceSummary(data) {
+            if (!data || typeof data !== "object") return "未知";
+            if (Array.isArray(data.images)) return data.images.length + " 张图片";
+            if (data.url) return "1 个视频/媒体直链";
+            return "0 个资源";
+        }
+        function createParseFlowLogger(rawInput) {
+            const c = window.console || {};
+            const traceId = "web-" + Date.now().toString(36) + "-" + Math.random().toString(16).slice(2, 8);
+            const started = performance.now();
+            let last = started;
+            let closed = false;
+            const rows = [];
+            const label = "[解析流程 " + traceId + "]";
+
+            if (c.groupCollapsed) c.groupCollapsed(label + " 点击「获取信息」");
+            else if (c.info) c.info(label + " 点击「获取信息」");
+
+            function mark(step, extra) {
+                const now = performance.now();
+                const row = Object.assign({
+                    "步骤": step,
+                    "本步耗时": fmtDuration(now - last),
+                    "累计耗时": fmtDuration(now - started),
+                }, extra || {});
+                rows.push(row);
+                if (c.info) c.info(label + " " + step, row);
+                last = now;
+            }
+
+            function finish(status, extra) {
+                if (closed) return;
+                mark("流程结束：" + status, extra);
+                if (c.table) c.table(rows);
+                if (c.groupEnd) c.groupEnd();
+                closed = true;
+            }
+
+            mark("读取输入并生成追踪 ID", {
+                "追踪ID": traceId,
+                "输入长度": String(rawInput || "").length,
+                "链接预览": shortPreview(firstUrl(rawInput) || rawInput, 140),
+            });
+            return { traceId, mark, finish };
+        }
         function escapeHtml(s) {
             return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
                 { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
@@ -766,8 +862,134 @@
         function openHelp() { $("helpBg").classList.add("show"); }
         function closeHelp() { $("helpBg").classList.remove("show"); }
         function onHelpBgClick(e) { if (e.target === $("helpBg")) closeHelp(); }
-        function openLightbox(src) { $("lightboxImg").src = src; $("lightbox").classList.add("show"); }
-        function closeLightbox() { $("lightbox").classList.remove("show"); $("lightboxImg").src = ""; }
+        function lightboxRect() { return $("lightboxStage").getBoundingClientRect(); }
+        function applyLightboxTransform() {
+            $("lightboxImg").style.transform = "translate(" + lightboxState.x + "px, " + lightboxState.y + "px) scale(" + lightboxState.scale + ")";
+        }
+        function clampLightboxPan() {
+            const img = $("lightboxImg");
+            const rect = lightboxRect();
+            const w = img.naturalWidth * lightboxState.scale;
+            const h = img.naturalHeight * lightboxState.scale;
+            if (!w || !h) return;
+            lightboxState.x = w <= rect.width ? (rect.width - w) / 2 : Math.min(0, Math.max(rect.width - w, lightboxState.x));
+            lightboxState.y = h <= rect.height ? (rect.height - h) / 2 : Math.min(0, Math.max(rect.height - h, lightboxState.y));
+        }
+        function fitLightboxImage() {
+            const img = $("lightboxImg");
+            if (!img.naturalWidth || !img.naturalHeight) return;
+            const rect = lightboxRect();
+            const pad = Math.min(56, Math.max(18, rect.width * .04));
+            const fit = Math.min(
+                (rect.width - pad * 2) / img.naturalWidth,
+                (rect.height - pad * 2) / img.naturalHeight,
+                1
+            );
+            lightboxState.minScale = Math.max(.05, fit);
+            lightboxState.maxScale = Math.max(4, fit * 8);
+            lightboxState.scale = lightboxState.minScale;
+            lightboxState.x = (rect.width - img.naturalWidth * lightboxState.scale) / 2;
+            lightboxState.y = (rect.height - img.naturalHeight * lightboxState.scale) / 2;
+            applyLightboxTransform();
+        }
+        function zoomLightboxTo(nextScale, clientX, clientY) {
+            const img = $("lightboxImg");
+            if (!img.naturalWidth || !img.naturalHeight) return;
+            const rect = lightboxRect();
+            const oldScale = lightboxState.scale;
+            const newScale = Math.min(lightboxState.maxScale, Math.max(lightboxState.minScale, nextScale));
+            const px = (clientX - rect.left - lightboxState.x) / oldScale;
+            const py = (clientY - rect.top - lightboxState.y) / oldScale;
+            lightboxState.scale = newScale;
+            lightboxState.x = clientX - rect.left - px * newScale;
+            lightboxState.y = clientY - rect.top - py * newScale;
+            clampLightboxPan();
+            applyLightboxTransform();
+        }
+        function zoomLightboxBy(factor) {
+            const rect = lightboxRect();
+            zoomLightboxTo(lightboxState.scale * factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
+        }
+        function sameImageSrc(a, b) {
+            if (!a || !b) return false;
+            try { return new URL(a, window.location.href).href === new URL(b, window.location.href).href; }
+            catch (e) { return a === b; }
+        }
+        function updateLightboxBounds() {
+            const img = $("lightboxImg");
+            if (!img.naturalWidth || !img.naturalHeight) return;
+            const rect = lightboxRect();
+            const pad = Math.min(56, Math.max(18, rect.width * .04));
+            const fit = Math.min(
+                (rect.width - pad * 2) / img.naturalWidth,
+                (rect.height - pad * 2) / img.naturalHeight,
+                1
+            );
+            lightboxState.minScale = Math.max(.05, fit);
+            lightboxState.maxScale = Math.max(4, fit * 8);
+        }
+        function swapLightboxToLoaded(src, oldNaturalWidth, oldNaturalHeight, token) {
+            const img = $("lightboxImg");
+            const rect = lightboxRect();
+            const centerX = (rect.width / 2 - lightboxState.x) / lightboxState.scale;
+            const centerY = (rect.height / 2 - lightboxState.y) / lightboxState.scale;
+            const oldScale = lightboxState.scale;
+            img.onload = () => {
+                if (token !== lightboxState.loadId || !$("lightbox").classList.contains("show")) return;
+                updateLightboxBounds();
+                const ratioX = oldNaturalWidth ? img.naturalWidth / oldNaturalWidth : 1;
+                const ratioY = oldNaturalHeight ? img.naturalHeight / oldNaturalHeight : 1;
+                const scaleRatio = oldNaturalWidth && oldNaturalHeight
+                    ? Math.min(oldNaturalWidth / img.naturalWidth, oldNaturalHeight / img.naturalHeight)
+                    : 1;
+                lightboxState.scale = Math.min(lightboxState.maxScale, Math.max(lightboxState.minScale, oldScale * scaleRatio));
+                lightboxState.x = rect.width / 2 - centerX * ratioX * lightboxState.scale;
+                lightboxState.y = rect.height / 2 - centerY * ratioY * lightboxState.scale;
+                clampLightboxPan();
+                applyLightboxTransform();
+            };
+            img.src = src;
+            if (img.complete) requestAnimationFrame(img.onload);
+        }
+        function preloadLightboxFull(fullSrc, token) {
+            const img = $("lightboxImg");
+            if (!fullSrc || sameImageSrc(img.currentSrc || img.getAttribute("src"), fullSrc)) return;
+            const oldNaturalWidth = img.naturalWidth;
+            const oldNaturalHeight = img.naturalHeight;
+            const hi = new Image();
+            hi.onload = () => {
+                if (token !== lightboxState.loadId || !$("lightbox").classList.contains("show")) return;
+                if (sameImageSrc(img.currentSrc || img.getAttribute("src"), fullSrc)) return;
+                swapLightboxToLoaded(hi.src, oldNaturalWidth, oldNaturalHeight, token);
+            };
+            hi.src = fullSrc;
+        }
+        function openLightbox(previewSrc, fullSrc) {
+            const img = $("lightboxImg");
+            const box = $("lightbox");
+            const token = ++lightboxState.loadId;
+            lightboxState.pointers.clear();
+            lightboxState.dragStart = null;
+            lightboxState.pinchStart = null;
+            box.classList.add("show");
+            document.body.classList.add("lb-open");
+            img.onload = () => {
+                if (token !== lightboxState.loadId) return;
+                fitLightboxImage();
+                preloadLightboxFull(fullSrc, token);
+            };
+            if (!sameImageSrc(img.currentSrc || img.getAttribute("src"), previewSrc)) img.src = previewSrc;
+            if (img.complete) requestAnimationFrame(img.onload);
+        }
+        function closeLightbox() {
+            lightboxState.loadId++;
+            $("lightbox").classList.remove("show");
+            $("lightboxStage").classList.remove("dragging");
+            document.body.classList.remove("lb-open");
+            lightboxState.pointers.clear();
+            lightboxState.dragStart = null;
+            lightboxState.pinchStart = null;
+        }
 
         document.addEventListener("keydown", (e) => {
             if (e.key !== "Escape") return;
@@ -969,10 +1191,12 @@
                 }
                 const opCopy = '<button type="button" class="op copy" title="复制原图直链" data-copy="' + escapeAttr(im.full) + '"><i class="fa-regular fa-copy"></i></button>';
 
+                const previewSrc = proxyUrl(im.preview);
+                const fullSrc = proxyUrl(im.full);
                 html += '<figure class="shot">' +
-                    '<button type="button" class="thumb" data-lightbox="' + escapeAttr(proxyUrl(im.full)) + '" aria-label="放大第 ' + (i + 1) + ' 张">' +
+                    '<button type="button" class="thumb" data-lightbox-preview="' + escapeAttr(previewSrc) + '" data-lightbox-full="' + escapeAttr(fullSrc) + '" aria-label="放大第 ' + (i + 1) + ' 张">' +
                     '<span class="idx">' + (i + 1) + '</span>' +
-                    '<img src="' + escapeAttr(proxyUrl(im.preview)) + '" loading="lazy" alt="图 ' + (i + 1) + '" data-fallback="1">' +
+                    '<img src="' + escapeAttr(previewSrc) + '" loading="lazy" alt="图 ' + (i + 1) + '" data-fallback="1">' +
                     '<span class="zoom"><i class="fa-solid fa-magnifying-glass-plus"></i></span>' +
                     '<span class="img-fail"><i class="fa-regular fa-image"></i>预览加载失败<br>可直接下载</span>' +
                     '</button>' +
@@ -1074,15 +1298,65 @@
             const url = $("linkInput").value.trim();
             clearAlert();
             if (!url) { showAlert("请先粘贴分享链接再试。", { type: "warn", title: "还没有链接" }); $("linkInput").focus(); return; }
+            const flow = createParseFlowLogger(url);
+            let finalStatus = "未完成";
+            let finalExtra = {};
             setLoading("parseBtn", true);
+            flow.mark("按钮进入加载状态");
             showSkeleton("link");
+            flow.mark("已展示解析占位内容");
             try {
-                const r = await fetch("/api/parse", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+                const body = JSON.stringify({ url });
+                flow.mark("准备发送后端解析请求", { "接口": "POST /api/parse", "请求体长度": body.length });
+                const requestStarted = performance.now();
+                const r = await fetch("/api/parse", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Parse-Trace-Id": flow.traceId },
+                    body,
+                });
+                flow.mark("收到后端 HTTP 响应", {
+                    "HTTP状态": r.status,
+                    "响应OK": r.ok,
+                    "网络等待": fmtDuration(performance.now() - requestStarted),
+                });
+                const jsonStarted = performance.now();
                 const data = await r.json();
-                if (!r.ok || data.status === "error") { $("resultBox").innerHTML = ""; showAlert(data.error || ("解析失败（HTTP " + r.status + "）"), { title: "解析失败" }); }
-                else renderResult(data);
-            } catch (e) { $("resultBox").innerHTML = ""; showAlert("网络请求失败：" + e.message, { title: "请求出错" }); }
-            finally { setLoading("parseBtn", false, '<i class="fa-solid fa-magnifying-glass"></i> 获取信息'); }
+                flow.mark("后端 JSON 读取完成", {
+                    "JSON读取": fmtDuration(performance.now() - jsonStarted),
+                    "后端状态": data.status || "无",
+                    "平台": data.platform || "无",
+                    "类型": data.type || "无",
+                    "资源": resultResourceSummary(data),
+                });
+                if (!r.ok || data.status === "error") {
+                    $("resultBox").innerHTML = "";
+                    const msg = data.error || ("解析失败（HTTP " + r.status + "）");
+                    flow.mark("解析失败，准备展示错误提示", { "错误": msg });
+                    showAlert(msg, { title: "解析失败" });
+                    finalStatus = "失败";
+                    finalExtra = { "错误": msg };
+                } else {
+                    const renderStarted = performance.now();
+                    renderResult(data);
+                    flow.mark("结果 DOM 渲染完成", {
+                        "渲染耗时": fmtDuration(performance.now() - renderStarted),
+                        "资源": resultResourceSummary(data),
+                    });
+                    finalStatus = "成功";
+                    finalExtra = { "平台": data.platform || "无", "类型": data.type || "无", "资源": resultResourceSummary(data) };
+                }
+            } catch (e) {
+                $("resultBox").innerHTML = "";
+                showAlert("网络请求失败：" + e.message, { title: "请求出错" });
+                finalStatus = "异常";
+                finalExtra = { "错误": e.message };
+            }
+            finally {
+                const restoreStarted = performance.now();
+                setLoading("parseBtn", false, '<i class="fa-solid fa-magnifying-glass"></i> 获取信息');
+                flow.mark("按钮状态恢复完成", { "耗时": fmtDuration(performance.now() - restoreStarted) });
+                flow.finish(finalStatus, finalExtra);
+            }
         }
 
         async function doExtract() {
@@ -1130,8 +1404,13 @@
             if (copyBtn) { copyText(copyBtn.getAttribute("data-copy"), copyBtn); return; }
             const copyElBtn = e.target.closest("[data-copy-el]");
             if (copyElBtn) { copyEl(copyElBtn.getAttribute("data-copy-el"), copyElBtn); return; }
-            const lbBtn = e.target.closest("[data-lightbox]");
-            if (lbBtn) { openLightbox(lbBtn.getAttribute("data-lightbox")); return; }
+            const lbBtn = e.target.closest("[data-lightbox-preview]");
+            if (lbBtn) {
+                const img = lbBtn.querySelector("img");
+                const previewSrc = (img && img.currentSrc) || lbBtn.getAttribute("data-lightbox-preview") || lbBtn.getAttribute("data-lightbox-full");
+                openLightbox(previewSrc, lbBtn.getAttribute("data-lightbox-full") || previewSrc);
+                return;
+            }
             const dlBtn = e.target.closest("[data-dlmenu]");
             if (dlBtn) { e.stopPropagation(); openDlMenu(dlBtn, parseInt(dlBtn.getAttribute("data-dlmenu"), 10)); return; }
             const actBtn = e.target.closest("[data-action]");
@@ -1149,13 +1428,69 @@
                 if (shot) shot.classList.add("broken");
             }
         }, true);
+
+        $("lightboxStage").addEventListener("wheel", (e) => {
+            if (!$("lightbox").classList.contains("show")) return;
+            e.preventDefault();
+            zoomLightboxTo(lightboxState.scale * (e.deltaY > 0 ? 0.88 : 1.14), e.clientX, e.clientY);
+        }, { passive: false });
+        $("lightboxStage").addEventListener("pointerdown", (e) => {
+            if (!$("lightbox").classList.contains("show")) return;
+            $("lightboxStage").setPointerCapture(e.pointerId);
+            lightboxState.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (lightboxState.pointers.size === 1) {
+                lightboxState.dragStart = { px: e.clientX, py: e.clientY, x: lightboxState.x, y: lightboxState.y };
+                $("lightboxStage").classList.add("dragging");
+            } else if (lightboxState.pointers.size === 2) {
+                const pts = Array.from(lightboxState.pointers.values());
+                const dx = pts[0].x - pts[1].x, dy = pts[0].y - pts[1].y;
+                lightboxState.pinchStart = { distance: Math.hypot(dx, dy), scale: lightboxState.scale };
+            }
+        });
+        $("lightboxStage").addEventListener("pointermove", (e) => {
+            if (!lightboxState.pointers.has(e.pointerId)) return;
+            lightboxState.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (lightboxState.pointers.size === 2 && lightboxState.pinchStart) {
+                const pts = Array.from(lightboxState.pointers.values());
+                const dx = pts[0].x - pts[1].x, dy = pts[0].y - pts[1].y;
+                const cx = (pts[0].x + pts[1].x) / 2, cy = (pts[0].y + pts[1].y) / 2;
+                zoomLightboxTo(lightboxState.pinchStart.scale * (Math.hypot(dx, dy) / lightboxState.pinchStart.distance), cx, cy);
+                return;
+            }
+            if (lightboxState.dragStart) {
+                lightboxState.x = lightboxState.dragStart.x + e.clientX - lightboxState.dragStart.px;
+                lightboxState.y = lightboxState.dragStart.y + e.clientY - lightboxState.dragStart.py;
+                clampLightboxPan();
+                applyLightboxTransform();
+            }
+        });
+        function endLightboxPointer(e) {
+            lightboxState.pointers.delete(e.pointerId);
+            if (lightboxState.pointers.size === 0) {
+                lightboxState.dragStart = null;
+                lightboxState.pinchStart = null;
+                $("lightboxStage").classList.remove("dragging");
+            } else if (lightboxState.pointers.size === 1) {
+                const pt = Array.from(lightboxState.pointers.values())[0];
+                lightboxState.dragStart = { px: pt.x, py: pt.y, x: lightboxState.x, y: lightboxState.y };
+                lightboxState.pinchStart = null;
+            }
+        }
+        $("lightboxStage").addEventListener("pointerup", endLightboxPointer);
+        $("lightboxStage").addEventListener("pointercancel", endLightboxPointer);
+        $("lbZoomOut").addEventListener("click", () => zoomLightboxBy(.82));
+        $("lbZoomReset").addEventListener("click", fitLightboxImage);
+        $("lbZoomIn").addEventListener("click", () => zoomLightboxBy(1.22));
         // 下载格式菜单：点击任一格式链接后关闭（链接 href 原生触发下载）
         $("dlMenu").addEventListener("click", (e) => {
             if (e.target.closest("[data-dlclose]")) closeDlMenu();
         });
 
         window.addEventListener("scroll", onScroll, { passive: true });
-        window.addEventListener("resize", closeDlMenu);
+        window.addEventListener("resize", () => {
+            closeDlMenu();
+            if ($("lightbox").classList.contains("show")) fitLightboxImage();
+        });
         document.addEventListener("click", (e) => {
             // 点击菜单或触发按钮以外的区域时关闭下载菜单（打开触发已 stopPropagation）
             if (!e.target.closest(".dl-menu") && !e.target.closest(".op.dl")) closeDlMenu();

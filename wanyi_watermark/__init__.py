@@ -8,7 +8,7 @@
 以便支持按模块运行（python -m wanyi_watermark.xiaohongshu_processor）。
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "wanyi"
 __email__ = "2368077712@qq.com"
 

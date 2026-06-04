@@ -9,10 +9,12 @@ from __future__ import annotations
 import html
 import logging
 import re
+import time
 from typing import Dict
 
 import requests
 
+from .diagnostics import parse_log, short_text
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +80,7 @@ def _find_media_url(html_text: str) -> str | None:
         if match:
             media_url = html.unescape(match.group("url")).strip()
             if media_url:
-                logger.debug("[GenericExtractor] 命中模式 %s", pattern.pattern[:40] + "...")
+                parse_log(logger, "通用解析命中媒体提取模式：%s", pattern.pattern[:40] + "...")
                 return media_url
     return None
 
@@ -93,19 +95,32 @@ def extract_generic_media(share_text: str) -> Dict[str, str]:
     """
 
     share_url = _extract_first_url(share_text)
-    logger.debug("[GenericExtractor] 开始解析链接: %s", share_url)
+    flow_start = time.perf_counter()
+    parse_log(logger, "通用解析开始：分享链接=%s", short_text(share_url))
 
+    step = time.perf_counter()
     response = requests.get(share_url, headers=GENERIC_HEADERS, timeout=10, allow_redirects=True)
     response.raise_for_status()
+    parse_log(
+        logger,
+        "通用解析页面请求完成：HTTP %s，最终地址=%s，HTML长度=%d",
+        response.status_code,
+        short_text(response.url),
+        len(response.text or ""),
+        step_start=step,
+        flow_start=flow_start,
+    )
 
     final_url = response.url
     html_text = response.text
-    logger.debug("[GenericExtractor] 最终地址: %s", final_url)
 
+    step = time.perf_counter()
     media_url = _find_media_url(html_text)
     if not media_url:
         raise ValueError("未从页面中发现可用的视频直链")
+    parse_log(logger, "通用解析媒体直链提取完成：%s", short_text(media_url), step_start=step, flow_start=flow_start)
 
+    step = time.perf_counter()
     title = (
         _extract_meta(html_text, "og:title")
         or _extract_meta(html_text, "twitter:title")
@@ -113,6 +128,14 @@ def extract_generic_media(share_text: str) -> Dict[str, str]:
     )
 
     caption = _extract_meta(html_text, "og:description") or _extract_meta(html_text, "description")
+    parse_log(
+        logger,
+        "通用解析元信息提取完成：标题长度=%d，文案长度=%d",
+        len(title or ""),
+        len(caption or ""),
+        step_start=step,
+        flow_start=flow_start,
+    )
 
     return {
         "status": "success",
@@ -123,4 +146,3 @@ def extract_generic_media(share_text: str) -> Dict[str, str]:
         "url": media_url,
         "source_url": final_url,
     }
-

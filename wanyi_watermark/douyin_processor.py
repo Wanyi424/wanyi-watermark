@@ -14,6 +14,8 @@ import dashscope
 # 在未安装 ffmpeg 的环境下导入失败。
 from mcp.server.fastmcp import Context
 
+from .diagnostics import parse_log, short_text
+
 # 请求头，模拟移动端访问
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) EdgiOS/121.0.2277.107 Version/17.0 Mobile/15E148 Safari/604.1'
@@ -45,34 +47,159 @@ class DouyinProcessor:
             # Python 关闭时可能无法导入模块，忽略清理
             pass
 
-    def parse_share_url(self, share_text: str) -> Dict[str, str]:
-        """从分享文本中提取无水印视频链接"""
+    def parse_media(self, share_text: str) -> Dict[str, any]:
+        """一次解析抖音分享链接，自动识别视频或图文笔记。"""
         import time
-        start_time = time.time()
+        start_time = time.perf_counter()
 
-        # 提取分享链接
+        parse_log(logger, "抖音统一解析开始：输入长度=%d", len(share_text or ""))
         urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', share_text)
         if not urls:
             raise ValueError("未找到有效的分享链接")
 
         share_url = urls[0]
-        logger.debug(f"[抖音视频] 提取到的链接: {share_url}")
+        parse_log(logger, "抖音统一解析提取到分享链接：%s", short_text(share_url))
 
-        t1 = time.time()
+        step = time.perf_counter()
+        parse_log(logger, "抖音统一解析开始请求短链接并跟随重定向")
         share_response = requests.get(share_url, headers=HEADERS, timeout=10, allow_redirects=True)
-        logger.debug(f"[抖音视频] 短链接重定向耗时: {time.time()-t1:.2f}秒")
+        parse_log(
+            logger,
+            "抖音统一解析短链接请求完成：HTTP %s，最终地址=%s，HTML长度=%d",
+            share_response.status_code,
+            short_text(share_response.url),
+            len(share_response.text or ""),
+            step_start=step,
+        )
+
+        item_id = share_response.url.split("?")[0].strip("/").split("/")[-1]
+        parse_log(logger, "抖音统一解析内容 ID 提取完成：%s", item_id)
+
+        detail_url = f"https://www.iesdouyin.com/share/video/{item_id}"
+        step = time.perf_counter()
+        parse_log(logger, "抖音统一解析开始请求详情页：%s", short_text(detail_url))
+        response = requests.get(detail_url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+        parse_log(
+            logger,
+            "抖音统一解析详情页请求完成：HTTP %s，HTML长度=%d",
+            response.status_code,
+            len(response.text or ""),
+            step_start=step,
+        )
+
+        pattern = re.compile(
+            pattern=r"window\._ROUTER_DATA\s*=\s*(.*?)</script>",
+            flags=re.DOTALL,
+        )
+        step = time.perf_counter()
+        find_res = pattern.search(response.text)
+        if not find_res or not find_res.group(1):
+            find_res = pattern.search(share_response.text or "")
+            if find_res and find_res.group(1):
+                parse_log(logger, "抖音统一解析详情页未命中，改用短链响应 HTML 路由数据")
+
+        if not find_res or not find_res.group(1):
+            raise ValueError("从HTML中解析视频或图文信息失败")
+        parse_log(logger, "抖音统一解析 HTML 路由数据定位完成", step_start=step)
+
+        step = time.perf_counter()
+        json_data = json.loads(find_res.group(1).strip())
+        parse_log(logger, "抖音统一解析路由 JSON 解析完成", step_start=step)
+
+        VIDEO_ID_PAGE_KEY = "video_(id)/page"
+        NOTE_ID_PAGE_KEY = "note_(id)/page"
+        if VIDEO_ID_PAGE_KEY in json_data["loaderData"]:
+            original_info = json_data["loaderData"][VIDEO_ID_PAGE_KEY]["videoInfoRes"]
+        elif NOTE_ID_PAGE_KEY in json_data["loaderData"]:
+            original_info = json_data["loaderData"][NOTE_ID_PAGE_KEY]["videoInfoRes"]
+        else:
+            raise Exception("无法从JSON中解析视频或图集信息")
+
+        data = original_info["item_list"][0]
+        desc = data.get("desc", "").strip() or f"douyin_{item_id}"
+        title = re.sub(r'[\\/:*?"<>|]', '_', desc)
+
+        if "images" in data and data["images"]:
+            step = time.perf_counter()
+            images = []
+            for img in data["images"]:
+                if "url_list" in img and img["url_list"]:
+                    images.append({
+                        "url": img["url_list"][0],
+                        "width": img.get("width"),
+                        "height": img.get("height"),
+                    })
+            if not images:
+                raise ValueError("无法提取图片URL")
+            parse_log(logger, "抖音统一解析图片直链提取完成：%d 张", len(images), step_start=step)
+            parse_log(logger, "抖音统一解析完成：图文，图片=%d 张", len(images), flow_start=start_time)
+            return {
+                "note_id": item_id,
+                "title": title,
+                "desc": desc,
+                "caption": desc,
+                "type": "image",
+                "images": images,
+            }
+
+        if "video" not in data or not data.get("video"):
+            raise ValueError("未找到视频信息")
+
+        video_url = data["video"]["play_addr"]["url_list"][0].replace("playwm", "play")
+        parse_log(logger, "抖音统一解析完成：视频，直链预览=%s", short_text(video_url), flow_start=start_time)
+        return {
+            "url": video_url,
+            "title": title,
+            "caption": desc,
+            "video_id": item_id,
+            "type": "video",
+        }
+
+    def parse_share_url(self, share_text: str) -> Dict[str, str]:
+        """从分享文本中提取无水印视频链接"""
+        import time
+        start_time = time.perf_counter()
+
+        # 提取分享链接
+        parse_log(logger, "抖音视频解析开始：输入长度=%d", len(share_text or ""))
+        urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', share_text)
+        if not urls:
+            raise ValueError("未找到有效的分享链接")
+
+        share_url = urls[0]
+        parse_log(logger, "抖音视频提取到分享链接：%s", short_text(share_url))
+
+        t1 = time.perf_counter()
+        parse_log(logger, "抖音视频开始请求短链接并跟随重定向")
+        share_response = requests.get(share_url, headers=HEADERS, timeout=10, allow_redirects=True)
+        parse_log(
+            logger,
+            "抖音视频短链接请求完成：HTTP %s，最终地址=%s",
+            share_response.status_code,
+            short_text(share_response.url),
+            step_start=t1,
+        )
 
         video_id = share_response.url.split("?")[0].strip("/").split("/")[-1]
-        logger.debug(f"[抖音视频] 视频ID: {video_id}")
+        parse_log(logger, "抖音视频 ID 提取完成：%s", video_id)
 
         share_url = f'https://www.iesdouyin.com/share/video/{video_id}'
 
         # 获取视频页面内容
-        t2 = time.time()
+        t2 = time.perf_counter()
+        parse_log(logger, "抖音视频开始请求详情页：%s", short_text(share_url))
         response = requests.get(share_url, headers=HEADERS, timeout=10)
         response.raise_for_status()
-        logger.debug(f"[抖音视频] 页面请求耗时: {time.time()-t2:.2f}秒")
+        parse_log(
+            logger,
+            "抖音视频详情页请求完成：HTTP %s，HTML长度=%d",
+            response.status_code,
+            len(response.text or ""),
+            step_start=t2,
+        )
 
+        t3 = time.perf_counter()
         pattern = re.compile(
             pattern=r"window\._ROUTER_DATA\s*=\s*(.*?)</script>",
             flags=re.DOTALL,
@@ -81,9 +208,12 @@ class DouyinProcessor:
 
         if not find_res or not find_res.group(1):
             raise ValueError("从HTML中解析视频信息失败")
+        parse_log(logger, "抖音视频 HTML 路由数据定位完成", step_start=t3)
 
         # 解析JSON数据
+        t4 = time.perf_counter()
         json_data = json.loads(find_res.group(1).strip())
+        parse_log(logger, "抖音视频路由 JSON 解析完成", step_start=t4)
         VIDEO_ID_PAGE_KEY = "video_(id)/page"
         NOTE_ID_PAGE_KEY = "note_(id)/page"
 
@@ -95,9 +225,11 @@ class DouyinProcessor:
             raise Exception("无法从JSON中解析视频或图集信息")
 
         data = original_video_info["item_list"][0]
+        parse_log(logger, "抖音视频 item_list 读取完成，开始判断资源类型")
 
         # 检查是否为图文笔记
         if "images" in data and data["images"]:
+            parse_log(logger, "抖音视频路径发现图片字段，判定为图文笔记")
             raise ValueError("这是图文笔记，请使用 parse_image_note 方法")
 
         # 检查是否有视频
@@ -113,9 +245,13 @@ class DouyinProcessor:
         # 替换文件名中的非法字符，仅用于文件命名
         safe_title = re.sub(r'[\\/:*?"<>|]', '_', raw_desc)
 
-        total_time = time.time() - start_time
-        logger.debug(f"[抖音视频] 解析完成，总耗时: {total_time:.2f}秒")
-        logger.debug(f"{'='*60}\n")
+        parse_log(
+            logger,
+            "抖音视频解析完成：标题长度=%d，直链预览=%s",
+            len(raw_desc),
+            short_text(video_url),
+            flow_start=start_time,
+        )
 
         return {
             "url": video_url,
@@ -145,23 +281,32 @@ class DouyinProcessor:
         """
         import time
 
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         # 提取分享链接
+        parse_log(logger, "抖音图文解析开始：输入长度=%d", len(share_text or ""))
         urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', share_text)
         if not urls:
             raise ValueError("未找到有效的分享链接")
 
         share_url = urls[0]
-        logger.debug(f"[抖音图文] 开始处理短链接: {share_url}")
+        parse_log(logger, "抖音图文提取到分享链接：%s", short_text(share_url))
 
         # 第一次请求：短链接重定向
-        t1 = time.time()
+        t1 = time.perf_counter()
+        parse_log(logger, "抖音图文开始请求短链接并跟随重定向")
         share_response = requests.get(share_url, headers=HEADERS, timeout=10, allow_redirects=True)
-        logger.debug(f"[抖音图文] 短链接重定向耗时: {time.time()-t1:.2f}秒")
+        parse_log(
+            logger,
+            "抖音图文短链接请求完成：HTTP %s，最终地址=%s，HTML长度=%d",
+            share_response.status_code,
+            short_text(share_response.url),
+            len(share_response.text or ""),
+            step_start=t1,
+        )
 
         note_id = share_response.url.split("?")[0].strip("/").split("/")[-1]
-        logger.debug(f"[抖音图文] Note ID: {note_id}")
+        parse_log(logger, "抖音图文 Note ID 提取完成：%s", note_id)
 
         # 第二次请求：获取页面内容（实际上第一次请求已经返回了内容，可以直接使用）
         # response = requests.get(share_response.url, headers=HEADERS, timeout=10)
@@ -169,6 +314,7 @@ class DouyinProcessor:
         response = share_response
         response.raise_for_status()
 
+        t2 = time.perf_counter()
         pattern = re.compile(
             pattern=r"window\._ROUTER_DATA\s*=\s*(.*?)</script>",
             flags=re.DOTALL,
@@ -177,9 +323,12 @@ class DouyinProcessor:
 
         if not find_res or not find_res.group(1):
             raise ValueError("从HTML中解析图文信息失败")
+        parse_log(logger, "抖音图文 HTML 路由数据定位完成", step_start=t2)
 
         # 解析JSON数据
+        t3 = time.perf_counter()
         json_data = json.loads(find_res.group(1).strip())
+        parse_log(logger, "抖音图文路由 JSON 解析完成", step_start=t3)
         NOTE_ID_PAGE_KEY = "note_(id)/page"
 
         if NOTE_ID_PAGE_KEY not in json_data["loaderData"]:
@@ -193,6 +342,7 @@ class DouyinProcessor:
             raise ValueError("该笔记中没有找到图片")
 
         # 提取图片列表（使用 url_list 获取无水印图片）
+        t4 = time.perf_counter()
         images = []
         for img in data["images"]:
             if "url_list" in img and img["url_list"]:
@@ -204,15 +354,20 @@ class DouyinProcessor:
 
         if not images:
             raise ValueError("无法提取图片URL")
+        parse_log(logger, "抖音图文图片直链提取完成：%d 张", len(images), step_start=t4)
 
         # 获取标题（抖音图文没有单独的描述字段，desc 就是标题）
         desc = data.get("desc", "").strip() or f"douyin_{note_id}"
         # 替换文件名中的非法字符，仅用于文件命名
         title = re.sub(r'[\\/:*?"<>|]', '_', desc)
 
-        total_time = time.time() - start_time
-        logger.debug(f"[抖音图文] 解析完成，总耗时: {total_time:.2f}秒，图片数量: {len(images)}")
-        logger.debug(f"{'='*60}\n")
+        parse_log(
+            logger,
+            "抖音图文解析完成：图片数量=%d，标题长度=%d",
+            len(images),
+            len(desc),
+            flow_start=start_time,
+        )
 
         return {
             "note_id": note_id,
@@ -324,4 +479,3 @@ if __name__ == "__main__":
     p = DouyinProcessor("")  # 解析链接无需 API 密钥
     data = p.parse_share_url(share)
     print(json.dumps(data, ensure_ascii=False, indent=2))
-
