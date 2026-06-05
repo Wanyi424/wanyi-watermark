@@ -22,6 +22,14 @@ const lightboxState = {
     loadId: 0,
 };
 
+// --- 竞态防护 & 区域状态 ---
+let currentParseId = 0;
+let currentExtractId = 0;
+let parseAbortCtrl = null;
+let extractAbortCtrl = null;
+let currentParseData = null;
+let currentHistoryEntryId = null;
+
 const $ = (id) => document.getElementById(id);
 const PLATFORM_LABEL = { douyin: "抖音", xiaohongshu: "小红书", generic: "通用平台" };
 const PLATFORM_ICON  = { douyin: "fa-brands fa-tiktok", xiaohongshu: "fa-solid fa-book-open", generic: "fa-solid fa-globe" };
@@ -100,7 +108,6 @@ function hasKey() {
     return serverDashscopeConfigured || !!getKey();
 }
 
-// 跨域资源走同源代理（图片显示/视频播放/真实下载）。图片与代理问题本期暂搁置，保留实现。
 function proxyUrl(u, download, filename) {
     let s = "/api/proxy?url=" + encodeURIComponent(u);
     if (download) s += "&download=1";
@@ -333,6 +340,7 @@ document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if ($("dlMenu").classList.contains("show")) return closeDlMenu();
     if ($("lightbox").classList.contains("show")) return closeLightbox();
+    if ($("historyDrawer").classList.contains("open")) return closeHistoryDrawer();
     if ($("copyBg").classList.contains("show")) return closeCopyFallback();
     if ($("modalBg").classList.contains("show")) return closeModal();
     if ($("helpBg").classList.contains("show")) return closeHelp();
@@ -353,7 +361,18 @@ function clearAlert() { $("alertBox").classList.remove("show"); }
 function onInput() { $("inputClear").classList.toggle("show", $("linkInput").value.length > 0); }
 function clearInput() {
     $("linkInput").value = ""; onInput(); clearAlert();
-    $("resultBox").innerHTML = "";
+    // 使旧的飞行中请求失效
+    ++currentParseId;
+    ++currentExtractId;
+    if (parseAbortCtrl) { parseAbortCtrl.abort(); parseAbortCtrl = null; }
+    if (extractAbortCtrl) { extractAbortCtrl.abort(); extractAbortCtrl = null; }
+    // 恢复按钮状态
+    setLoading("parseBtn", false, '<i class="fa-solid fa-magnifying-glass"></i> 获取信息');
+    setLoading("extractBtn", false, '<i class="fa-solid fa-closed-captioning"></i><span class="label">提取文案</span><span class="need-key">需 Key</span>');
+    $("mediaZone").innerHTML = "";
+    $("extractZone").innerHTML = "";
+    currentParseData = null;
+    currentHistoryEntryId = null;
     $("linkInput").focus();
     window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -400,7 +419,6 @@ async function copyText(text, btn) {
         if (btn) { const old = btn.innerHTML; btn.innerHTML = '<i class="fa-solid fa-check"></i> 已复制'; setTimeout(() => { btn.innerHTML = old; }, 1300); }
         toast("已复制到剪贴板");
     } else {
-        // 非安全上下文（如局域网 IP 访问）下 clipboard 与 execCommand 均不可用 → 降级为手动复制
         showCopyFallback(text);
     }
 }
@@ -417,17 +435,14 @@ function closeCopyFallback() { $("copyBg").classList.remove("show"); }
 function onCopyBgClick(e) { if (e.target === $("copyBg")) closeCopyFallback(); }
 function reselectCopyText() { const ta = $("copyFallbackText"); ta.focus(); ta.select(); }
 
-/* ---------- 骨架 ---------- */
-function showSkeleton(kind) {
-    const grid = kind === "image"
-        ? '<div class="sk-grid">' + Array(6).fill('<div class="sk-shot"></div>').join("") + '</div>'
-        : '<div class="sk-line" style="width:92%"></div><div class="sk-line" style="width:78%"></div><div class="sk-line" style="width:85%"></div>';
-    const title = kind === "extract" ? "正在识别视频文案" : "正在解析链接";
-    const sub = kind === "extract" ? "下载音频并进行语音识别，通常需要数十秒…" : "正在请求源站并提取无水印资源…";
-    $("resultBox").innerHTML =
+/* ---------- 骨架屏 ---------- */
+function showMediaSkeleton() {
+    $("mediaZone").innerHTML =
         '<div class="card skeleton"><div class="card-body">' +
         '<div class="sk-head"><div class="sk-spinner" aria-hidden="true"></div>' +
-        '<div class="sk-text"><strong>' + title + '</strong><span>' + sub + '</span></div></div>' + grid + '</div></div>';
+        '<div class="sk-text"><strong>正在解析链接</strong><span>正在请求源站并提取无水印资源…</span></div></div>' +
+        '<div class="sk-line" style="width:92%"></div><div class="sk-line" style="width:78%"></div><div class="sk-line" style="width:85%"></div>' +
+        '</div></div>';
 }
 
 /* ---------- 信息块（标题/文案，完整常显） ---------- */
@@ -449,8 +464,9 @@ function metaBlocks(data) {
     return html ? '<div class="meta">' + html + '</div>' : "";
 }
 
-/* ---------- 渲染：解析结果（核心资源置顶，信息常显于下方） ---------- */
-function renderResult(data) {
+/* ---------- 渲染：媒体区 ---------- */
+function renderMediaZone(data) {
+    currentParseData = data;
     const platform = data.platform || "generic";
     const platLabel = PLATFORM_LABEL[platform] || platform;
     const platIcon = PLATFORM_ICON[platform] || "fa-solid fa-circle-nodes";
@@ -469,7 +485,7 @@ function renderResult(data) {
     else if (isImage && Array.isArray(data.images) && data.images.length) core = renderGallery(data.images, data);
     else core = '<div class="field"><div class="val boxed" style="color:var(--muted)">未获取到可用的资源直链。</div></div>';
 
-    $("resultBox").innerHTML =
+    $("mediaZone").innerHTML =
         '<div class="card"><div class="card-head">' +
         '<span class="ch-icon"><i class="' + typeIcon + '"></i></span>' +
         '<div><div class="ch-title">解析结果</div><div class="ch-sub">' + escapeHtml(platLabel) + ' · ' + typeLabel + '</div></div>' +
@@ -504,10 +520,10 @@ function renderGallery(images, data) {
         const single = img.url || "";
         return {
             png: png, webp: webp, single: single,
-            preview: webp || png || single,   // 预览优先轻量 webp
-            full: png || single || webp,       // 灯箱 / 复制优先高清
+            preview: webp || png || single,
+            full: png || single || webp,
             name: base + "_" + (i + 1),
-            multi: !!(png && webp),            // 是否有 PNG/WebP 双格式
+            multi: !!(png && webp),
         };
     });
 
@@ -519,10 +535,8 @@ function renderGallery(images, data) {
     galleryImages.forEach((im, i) => {
         let opMain;
         if (im.multi) {
-            // 双格式 → 下载二级菜单（PNG 高清 / WebP 轻量），点击事件由委托处理
             opMain = '<button type="button" class="op dl" data-dlmenu="' + i + '" title="选择下载格式"><i class="fa-solid fa-download"></i> 下载 <i class="fa-solid fa-caret-down caret"></i></button>';
         } else {
-            // 单一格式 → 直接下载（真实 <a href>，原生触发）
             const only = im.png || im.single || im.webp;
             const ext = im.png ? ".png" : (im.webp ? ".webp" : ".jpg");
             opMain = '<a class="op single" href="' + escapeAttr(proxyUrl(only, true, im.name + ext)) + '" title="下载图片"><i class="fa-solid fa-download"></i> 下载</a>';
@@ -553,7 +567,6 @@ function openDlMenu(triggerEl, idx) {
     if (im.png) inner += '<a class="png" href="' + escapeAttr(proxyUrl(im.png, true, im.name + ".png")) + '" data-dlclose="1"><i class="fa-solid fa-gem"></i> PNG 高清 <span class="hint">无损</span></a>';
     if (im.webp) inner += '<a class="webp" href="' + escapeAttr(proxyUrl(im.webp, true, im.name + ".webp")) + '" data-dlclose="1"><i class="fa-solid fa-feather"></i> WebP 轻量 <span class="hint">体积小</span></a>';
     menu.innerHTML = inner;
-    // 先以隐藏态显示以测量尺寸，再做边界安全定位
     menu.style.visibility = "hidden";
     menu.classList.add("show");
     const r = triggerEl.getBoundingClientRect();
@@ -561,14 +574,14 @@ function openDlMenu(triggerEl, idx) {
     let left = r.left, top = r.bottom + 6;
     if (left + mw > window.innerWidth - pad) left = window.innerWidth - mw - pad;
     if (left < pad) left = pad;
-    if (top + mh > window.innerHeight - pad) top = r.top - mh - 6;   // 下方空间不足则上翻
+    if (top + mh > window.innerHeight - pad) top = r.top - mh - 6;
     menu.style.left = left + "px";
     menu.style.top = top + "px";
     menu.style.visibility = "visible";
 }
 function closeDlMenu() { $("dlMenu").classList.remove("show"); }
 
-/* ---------- 一键下载全部（同源代理 + download 属性，错峰逐个触发） ---------- */
+/* ---------- 一键下载全部 ---------- */
 async function downloadAll() {
     if (!galleryImages.length) return;
     closeDlMenu();
@@ -582,41 +595,66 @@ async function downloadAll() {
         a.href = proxyUrl(url, true, im.name + ext);
         a.download = im.name + ext;
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        await new Promise((res) => setTimeout(res, 350));   // 错峰，避免浏览器拥塞/拦截
+        await new Promise((res) => setTimeout(res, 350));
     }
     toast("已触发全部下载，请在下载目录查看");
 }
 
-/* ---------- 渲染：文案 ---------- */
-function renderTranscript(data) {
-    lastTranscript = data.text || "";
-    lastTranscriptTitle = data.title || "视频文案";
-    const platform = data.platform || "generic";
-    const platLabel = PLATFORM_LABEL[platform] || platform;
-    const count = (data.text || "").length;
+/* ---------- 提取区渲染 ---------- */
+function renderExtractZone(state, data) {
+    const zone = $("extractZone");
+    if (state === "idle") { zone.innerHTML = ""; return; }
 
-    let body = '<div class="tags">' +
-        '<span class="tag accent"><i class="fa-solid fa-closed-captioning"></i> 文案提取</span>' +
-        '<span class="tag"><i class="' + (PLATFORM_ICON[platform] || "fa-solid fa-globe") + '"></i> ' + escapeHtml(platLabel) + '</span></div>';
+    if (state === "loading") {
+        zone.innerHTML =
+            '<div class="card extract-card"><div class="card-body">' +
+            '<div class="sk-head"><div class="sk-spinner" aria-hidden="true"></div>' +
+            '<div class="sk-text"><strong>正在识别视频文案</strong><span>下载音频并进行语音识别，通常需要数十秒…</span></div></div>' +
+            '<div class="extract-actions"><button type="button" class="btn btn-ghost btn-sm" data-action="cancel-extract">' +
+            '<i class="fa-solid fa-xmark"></i> 取消</button></div>' +
+            '</div></div>';
+        return;
+    }
 
-    body += '<div class="field"><div class="lbl"><span class="lbl-text"><i class="fa-solid fa-quote-left" style="color:var(--brand)"></i> 识别文案</span>' +
-        '<span class="spacer"></span><span class="word-count"><i class="fa-solid fa-pen-nib"></i> ' + count + ' 字</span></div>' +
-        '<div class="transcript" id="transcriptText">' + escapeHtml(data.text || "（未识别到内容）") + '</div>' +
-        '<div class="transcript-foot">' +
-        '<button type="button" class="btn btn-secondary btn-sm" data-copy-el="transcriptText"><i class="fa-regular fa-copy"></i> 复制文案</button>' +
-        '<button type="button" class="btn btn-ghost btn-sm" data-action="dlmd"><i class="fa-brands fa-markdown"></i> 下载 Markdown</button>' +
-        '</div></div>';
+    if (state === "success") {
+        lastTranscript = data.text || "";
+        lastTranscriptTitle = data.title || "视频文案";
+        const platform = data.platform || "generic";
+        const platLabel = PLATFORM_LABEL[platform] || platform;
+        const count = (data.text || "").length;
 
-    const metaData = {};
-    if (data.title) metaData.title = data.title;
-    if (data.caption) metaData.caption = data.caption;
-    body += metaBlocks(metaData);
+        let body = '<div class="tags">' +
+            '<span class="tag accent"><i class="fa-solid fa-closed-captioning"></i> 文案提取</span>' +
+            '<span class="tag"><i class="' + (PLATFORM_ICON[platform] || "fa-solid fa-globe") + '"></i> ' + escapeHtml(platLabel) + '</span></div>';
 
-    $("resultBox").innerHTML =
-        '<div class="card"><div class="card-head">' +
-        '<span class="ch-icon accent"><i class="fa-solid fa-closed-captioning"></i></span>' +
-        '<div><div class="ch-title">文案提取结果</div><div class="ch-sub">' + escapeHtml(platLabel) + ' · 语音识别</div></div>' +
-        '</div><div class="card-body">' + body + '</div></div>';
+        body += '<div class="field"><div class="lbl"><span class="lbl-text"><i class="fa-solid fa-quote-left" style="color:var(--brand)"></i> 识别文案</span>' +
+            '<span class="spacer"></span><span class="word-count"><i class="fa-solid fa-pen-nib"></i> ' + count + ' 字</span></div>' +
+            '<div class="transcript" id="transcriptText">' + escapeHtml(data.text || "（未识别到内容）") + '</div>' +
+            '<div class="transcript-foot">' +
+            '<button type="button" class="btn btn-secondary btn-sm" data-copy-el="transcriptText"><i class="fa-regular fa-copy"></i> 复制文案</button>' +
+            '<button type="button" class="btn btn-ghost btn-sm" data-action="dlmd"><i class="fa-brands fa-markdown"></i> 下载 Markdown</button>' +
+            '</div></div>';
+
+        zone.innerHTML =
+            '<div class="card"><div class="card-head">' +
+            '<span class="ch-icon accent"><i class="fa-solid fa-closed-captioning"></i></span>' +
+            '<div><div class="ch-title">文案提取结果</div><div class="ch-sub">' + escapeHtml(platLabel) + ' · 语音识别</div></div>' +
+            '</div><div class="card-body">' + body + '</div></div>';
+        return;
+    }
+
+    if (state === "failure") {
+        const errMsg = (data && data.error) || "提取失败";
+        zone.innerHTML =
+            '<div class="card extract-card"><div class="card-body">' +
+            '<div class="extract-error">' +
+            '<div class="extract-error-head"><i class="fa-solid fa-circle-exclamation"></i> 文案提取失败</div>' +
+            '<div class="extract-error-msg">' + escapeHtml(errMsg) + '</div>' +
+            '<div class="extract-actions">' +
+            '<button type="button" class="btn btn-secondary btn-sm" data-action="retry-extract"><i class="fa-solid fa-rotate-right"></i> 重试</button>' +
+            '</div></div></div></div>';
+        return;
+    }
 }
 
 function downloadTranscriptMd() {
@@ -631,17 +669,183 @@ function downloadTranscriptMd() {
     toast("Markdown 已下载");
 }
 
+/* ---------- 历史记录（抽屉式） ---------- */
+const HISTORY_KEY = "wanyi_history";
+const HISTORY_MAX = 30;
+
+function loadHistory() {
+    try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"); }
+    catch (e) { return []; }
+}
+function saveHistory(entries) {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, HISTORY_MAX)));
+}
+function addHistoryEntry(data, inputUrl) {
+    const entry = {
+        id: Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8),
+        platform: data.platform || "generic",
+        type: data.type || "video",
+        title: data.title || "",
+        caption: data.caption || data.desc || "",
+        url: data.url || "",
+        images: data.images || [],
+        image_count: data.image_count || 0,
+        inputUrl: inputUrl,
+        timestamp: Date.now(),
+        transcript: null,
+    };
+    const hist = loadHistory();
+    hist.unshift(entry);
+    saveHistory(hist);
+    currentHistoryEntryId = entry.id;
+    refreshHistoryBadge();
+    if ($("historyDrawer").classList.contains("open")) renderHistoryDrawer();
+    return entry.id;
+}
+function updateHistoryTranscript(entryId, text) {
+    if (!entryId) return;
+    const hist = loadHistory();
+    const item = hist.find(function (h) { return h.id === entryId; });
+    if (item) {
+        item.transcript = text;
+        saveHistory(hist);
+        if ($("historyDrawer").classList.contains("open")) renderHistoryDrawer();
+    }
+}
+function formatRelTime(ts) {
+    const diff = Date.now() - ts;
+    if (diff < 60000) return "刚刚";
+    if (diff < 3600000) return Math.floor(diff / 60000) + " 分钟前";
+    if (diff < 86400000) return Math.floor(diff / 3600000) + " 小时前";
+    if (diff < 604800000) return Math.floor(diff / 86400000) + " 天前";
+    const d = new Date(ts);
+    return (d.getMonth() + 1) + "/" + d.getDate();
+}
+function refreshHistoryBadge() {
+    const count = loadHistory().length;
+    const badge = $("historyBadge");
+    if (count > 0) {
+        badge.textContent = count > 99 ? "99+" : count;
+        badge.classList.add("show");
+    } else {
+        badge.classList.remove("show");
+    }
+}
+function renderHistoryDrawer() {
+    const hist = loadHistory();
+    const list = $("historyList");
+    const foot = $("historyFoot");
+
+    if (!hist.length) {
+        list.innerHTML = '<div class="drawer-empty"><i class="fa-solid fa-inbox"></i><p>暂无解析历史</p></div>';
+        foot.classList.remove("show");
+        foot.innerHTML = "";
+        return;
+    }
+
+    let items = "";
+    hist.forEach(function (h) {
+        const platLabel = PLATFORM_LABEL[h.platform] || h.platform;
+        const typeIcon = h.type === "image" ? "fa-solid fa-images" : "fa-solid fa-film";
+        const isImg = h.type === "image";
+        const title = h.title || h.caption || h.inputUrl || "无标题";
+        const transcriptBadge = h.transcript
+            ? '<span class="hi-transcript-badge">文案</span>'
+            : '';
+        items += '<div class="history-item" data-action="restore-history" data-history-id="' + escapeAttr(h.id) + '">' +
+            '<span class="hi-type-icon' + (isImg ? " img" : "") + '"><i class="' + typeIcon + '"></i></span>' +
+            '<div class="hi-body">' +
+            '<div class="hi-title">' + escapeHtml(shortPreview(title, 50)) + '</div>' +
+            '<div class="hi-meta"><span class="hi-platform">' + escapeHtml(platLabel) + '</span>' +
+            '<span>' + formatRelTime(h.timestamp) + '</span>' +
+            transcriptBadge + '</div></div>' +
+            '<button type="button" class="hi-remove" data-action="remove-history" data-history-id="' + escapeAttr(h.id) + '" title="删除"><i class="fa-solid fa-xmark"></i></button>' +
+            '</div>';
+    });
+    list.innerHTML = items;
+
+    foot.classList.add("show");
+    foot.innerHTML = '<button type="button" class="btn btn-ghost btn-sm" data-action="clear-history" style="width:100%"><i class="fa-solid fa-trash-can"></i> 清空所有记录</button>';
+}
+function openHistoryDrawer() {
+    renderHistoryDrawer();
+    $("historyDrawer").classList.add("open");
+    $("drawerBackdrop").classList.add("show");
+    document.body.style.overflow = "hidden";
+}
+function closeHistoryDrawer() {
+    $("historyDrawer").classList.remove("open");
+    $("drawerBackdrop").classList.remove("show");
+    document.body.style.overflow = "";
+}
+function toggleHistoryDrawer() {
+    if ($("historyDrawer").classList.contains("open")) closeHistoryDrawer();
+    else openHistoryDrawer();
+}
+function restoreHistory(entryId) {
+    const hist = loadHistory();
+    const entry = hist.find(function (h) { return h.id === entryId; });
+    if (!entry) { toast("记录不存在", "err"); return; }
+
+    // 使旧的飞行中请求失效
+    ++currentParseId;
+    ++currentExtractId;
+    if (parseAbortCtrl) { parseAbortCtrl.abort(); parseAbortCtrl = null; }
+    if (extractAbortCtrl) { extractAbortCtrl.abort(); extractAbortCtrl = null; }
+    setLoading("parseBtn", false, '<i class="fa-solid fa-magnifying-glass"></i> 获取信息');
+    setLoading("extractBtn", false, '<i class="fa-solid fa-closed-captioning"></i><span class="label">提取文案</span><span class="need-key">需 Key</span>');
+
+    $("linkInput").value = entry.inputUrl || "";
+    onInput();
+    currentHistoryEntryId = entry.id;
+
+    renderMediaZone(entry);
+
+    if (entry.transcript) {
+        renderExtractZone("success", { text: entry.transcript, title: entry.title, platform: entry.platform, caption: entry.caption });
+    } else {
+        renderExtractZone("idle");
+    }
+
+    closeHistoryDrawer();
+    $("mediaZone").scrollIntoView({ behavior: "smooth", block: "start" });
+    toast("已恢复历史记录");
+}
+function removeHistoryItem(entryId) {
+    const hist = loadHistory();
+    const idx = hist.findIndex(function (h) { return h.id === entryId; });
+    if (idx === -1) return;
+    hist.splice(idx, 1);
+    saveHistory(hist);
+    renderHistoryDrawer();
+    refreshHistoryBadge();
+    toast("已删除");
+}
+function clearHistory() {
+    if (!confirm("确定要清空所有解析历史吗？此操作不可撤销。")) return;
+    localStorage.removeItem(HISTORY_KEY);
+    renderHistoryDrawer();
+    refreshHistoryBadge();
+    toast("历史已清空");
+}
+
 /* ---------- 请求 ---------- */
 async function doParse() {
     const url = $("linkInput").value.trim();
     clearAlert();
     if (!url) { showAlert("请先粘贴分享链接再试。", { type: "warn", title: "还没有链接" }); $("linkInput").focus(); return; }
+
+    const reqId = ++currentParseId;
+    if (parseAbortCtrl) parseAbortCtrl.abort();
+    parseAbortCtrl = new AbortController();
+
     const flow = createParseFlowLogger(url);
     let finalStatus = "未完成";
     let finalExtra = {};
     setLoading("parseBtn", true);
     flow.mark("按钮进入加载状态");
-    showSkeleton("link");
+    showMediaSkeleton();
+    $("extractZone").innerHTML = "";
     flow.mark("已展示解析占位内容");
     try {
         const body = JSON.stringify({ url });
@@ -651,7 +855,9 @@ async function doParse() {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-Parse-Trace-Id": flow.traceId },
             body,
+            signal: parseAbortCtrl.signal,
         });
+        if (reqId !== currentParseId) { flow.finish("已废弃（新请求覆盖）"); return; }
         flow.mark("收到后端 HTTP 响应", {
             "HTTP状态": r.status,
             "响应OK": r.ok,
@@ -659,6 +865,7 @@ async function doParse() {
         });
         const jsonStarted = performance.now();
         const data = await r.json();
+        if (reqId !== currentParseId) { flow.finish("已废弃（新请求覆盖）"); return; }
         flow.mark("后端 JSON 读取完成", {
             "JSON读取": fmtDuration(performance.now() - jsonStarted),
             "后端状态": data.status || "无",
@@ -667,7 +874,7 @@ async function doParse() {
             "资源": resultResourceSummary(data),
         });
         if (!r.ok || data.status === "error") {
-            $("resultBox").innerHTML = "";
+            $("mediaZone").innerHTML = "";
             const msg = data.error || ("解析失败（HTTP " + r.status + "）");
             flow.mark("解析失败，准备展示错误提示", { "错误": msg });
             showAlert(msg, { title: "解析失败" });
@@ -675,7 +882,8 @@ async function doParse() {
             finalExtra = { "错误": msg };
         } else {
             const renderStarted = performance.now();
-            renderResult(data);
+            renderMediaZone(data);
+            addHistoryEntry(data, url);
             flow.mark("结果 DOM 渲染完成", {
                 "渲染耗时": fmtDuration(performance.now() - renderStarted),
                 "资源": resultResourceSummary(data),
@@ -684,17 +892,32 @@ async function doParse() {
             finalExtra = { "平台": data.platform || "无", "类型": data.type || "无", "资源": resultResourceSummary(data) };
         }
     } catch (e) {
-        $("resultBox").innerHTML = "";
+        if (e.name === "AbortError") { flow.finish("已取消"); return; }
+        if (reqId !== currentParseId) { flow.finish("已废弃"); return; }
+        $("mediaZone").innerHTML = "";
         showAlert("网络请求失败：" + e.message, { title: "请求出错" });
         finalStatus = "异常";
         finalExtra = { "错误": e.message };
     }
     finally {
-        const restoreStarted = performance.now();
-        setLoading("parseBtn", false, '<i class="fa-solid fa-magnifying-glass"></i> 获取信息');
-        flow.mark("按钮状态恢复完成", { "耗时": fmtDuration(performance.now() - restoreStarted) });
+        if (reqId === currentParseId) {
+            setLoading("parseBtn", false, '<i class="fa-solid fa-magnifying-glass"></i> 获取信息');
+        }
+        flow.mark("按钮状态恢复完成");
         flow.finish(finalStatus, finalExtra);
     }
+}
+
+function cancelExtract() {
+    if (extractAbortCtrl) extractAbortCtrl.abort();
+    currentExtractId++;
+    renderExtractZone("idle");
+    setLoading("extractBtn", false, '<i class="fa-solid fa-closed-captioning"></i><span class="label">提取文案</span><span class="need-key">需 Key</span>');
+    toast("已取消提取");
+}
+
+function retryExtract() {
+    doExtract();
 }
 
 async function doExtract() {
@@ -706,24 +929,48 @@ async function doExtract() {
         const label = be === "siliconflow" ? "硅基流动 API Key" : "阿里云百炼 API Key";
         showAlert("「提取文案」需要先配置" + label + "，已为你打开配置窗口。", { type: "warn", title: "需要 API Key" }); openModal(); return;
     }
+
+    const reqId = ++currentExtractId;
+    if (extractAbortCtrl) extractAbortCtrl.abort();
+    extractAbortCtrl = new AbortController();
+
     setLoading("extractBtn", true);
-    showSkeleton("extract");
+    renderExtractZone("loading");
     try {
         const be = getEffectiveBackend();
         const key = be === "siliconflow" ? getSfKey() : getKey();
         const payload = { url, api_key: key, backend: be };
-        const r = await fetch("/api/extract", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const r = await fetch("/api/extract", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal: extractAbortCtrl.signal,
+        });
+        if (reqId !== currentExtractId) return;
         const data = await r.json();
-        if (!r.ok || data.status === "error") { $("resultBox").innerHTML = ""; showAlert(data.error || ("提取失败（HTTP " + r.status + "）"), { title: "提取失败" }); }
-        else renderTranscript(data);
-    } catch (e) { $("resultBox").innerHTML = ""; showAlert("网络请求失败：" + e.message, { title: "请求出错" }); }
-    finally { setLoading("extractBtn", false, '<i class="fa-solid fa-closed-captioning"></i><span class="label">提取文案</span><span class="need-key">需 Key</span>'); }
+        if (reqId !== currentExtractId) return;
+        if (!r.ok || data.status === "error") {
+            renderExtractZone("failure", { error: data.error || ("提取失败（HTTP " + r.status + "）") });
+        } else {
+            renderExtractZone("success", data);
+            updateHistoryTranscript(currentHistoryEntryId, data.text || "");
+        }
+    } catch (e) {
+        if (e.name === "AbortError") return;
+        if (reqId !== currentExtractId) return;
+        renderExtractZone("failure", { error: "网络请求失败：" + e.message });
+    }
+    finally {
+        if (reqId === currentExtractId) {
+            setLoading("extractBtn", false, '<i class="fa-solid fa-closed-captioning"></i><span class="label">提取文案</span><span class="need-key">需 Key</span>');
+        }
+    }
 }
 
 /* ---------- 回到顶部显隐 ---------- */
 function onScroll() {
-    closeDlMenu();   // 页面滚动时浮层会脱离锚点，直接关闭
-    const show = window.scrollY > 320 && $("resultBox").children.length > 0;
+    closeDlMenu();
+    const show = window.scrollY > 320 && $("mediaZone").innerHTML.trim() !== "";
     $("backTop").classList.toggle("show", show);
 }
 
@@ -745,11 +992,12 @@ Object.assign(window, {
     closeCopyFallback, onCopyBgClick, reselectCopyText,
     openDlMenu, closeDlMenu, downloadAll,
     clearAlert, onInput, clearInput, onKeydown, pasteFromClipboard, scrollTopFocus,
-    copyText, copyEl, downloadTranscriptMd, onVideoError, doParse, doExtract
+    copyText, copyEl, downloadTranscriptMd, onVideoError, doParse, doExtract,
+    cancelExtract, retryExtract, restoreHistory, removeHistoryItem, clearHistory,
+    toggleHistoryDrawer, openHistoryDrawer, closeHistoryDrawer,
 });
 
-// 结果区事件委托：用 data-* 取代动态拼接的 onclick（onclick 内嵌 JSON 字符串的双引号
-// 会提前截断 HTML 属性导致处理器失效）。复制 / 预览 / 下载统一在此分发。
+// 结果区事件委托
 $("resultBox").addEventListener("click", (e) => {
     const copyBtn = e.target.closest("[data-copy]");
     if (copyBtn) { copyText(copyBtn.getAttribute("data-copy"), copyBtn); return; }
@@ -769,9 +1017,10 @@ $("resultBox").addEventListener("click", (e) => {
         const act = actBtn.getAttribute("data-action");
         if (act === "dlall") downloadAll();
         else if (act === "dlmd") downloadTranscriptMd();
+        else if (act === "cancel-extract") cancelExtract();
+        else if (act === "retry-extract") retryExtract();
     }
 });
-// 图片预览加载失败 → 标记 broken（error 事件不冒泡，用捕获阶段委托）
 $("resultBox").addEventListener("error", (e) => {
     const img = e.target;
     if (img && img.tagName === "IMG" && img.hasAttribute("data-fallback")) {
@@ -832,7 +1081,6 @@ $("lightboxStage").addEventListener("pointercancel", endLightboxPointer);
 $("lbZoomOut").addEventListener("click", () => zoomLightboxBy(.82));
 $("lbZoomReset").addEventListener("click", fitLightboxImage);
 $("lbZoomIn").addEventListener("click", () => zoomLightboxBy(1.22));
-// 下载格式菜单：点击任一格式链接后关闭（链接 href 原生触发下载）
 $("dlMenu").addEventListener("click", (e) => {
     if (e.target.closest("[data-dlclose]")) closeDlMenu();
 });
@@ -843,8 +1091,18 @@ window.addEventListener("resize", () => {
     if ($("lightbox").classList.contains("show")) fitLightboxImage();
 });
 document.addEventListener("click", (e) => {
-    // 点击菜单或触发按钮以外的区域时关闭下载菜单（打开触发已 stopPropagation）
     if (!e.target.closest(".dl-menu") && !e.target.closest(".op.dl")) closeDlMenu();
 });
 initHealth();
+refreshHistoryBadge();
+
+// 历史抽屉事件委托
+$("historyDrawer").addEventListener("click", (e) => {
+    const actBtn = e.target.closest("[data-action]");
+    if (!actBtn) return;
+    const act = actBtn.getAttribute("data-action");
+    if (act === "restore-history") restoreHistory(actBtn.getAttribute("data-history-id"));
+    else if (act === "remove-history") { e.stopPropagation(); removeHistoryItem(actBtn.getAttribute("data-history-id")); }
+    else if (act === "clear-history") clearHistory();
+});
 })();

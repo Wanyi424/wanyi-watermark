@@ -24,6 +24,10 @@
                 <span class="dot" aria-hidden="true"></span>
                 <span id="apiChipText">API 未配置</span>
             </button>
+            <button class="icon-round" id="historyBtn" onclick="toggleHistoryDrawer()" title="历史记录" aria-haspopup="dialog" aria-label="历史记录">
+                <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>
+                <span class="badge" id="historyBadge"></span>
+            </button>
             <button class="icon-round" onclick="openHelp()" title="使用说明" aria-haspopup="dialog" aria-label="使用说明">
                 <i class="fa-solid fa-circle-question" aria-hidden="true"></i>
             </button>
@@ -72,7 +76,10 @@
         </section>
 
         <!-- 结果区 -->
-        <section class="result" id="resultBox" aria-live="polite"></section>
+        <section class="result" id="resultBox" aria-live="polite">
+            <div id="mediaZone" class="zone zone-media"></div>
+            <div id="extractZone" class="zone zone-extract"></div>
+        </section>
     </main>
 
     <footer class="footer">
@@ -166,6 +173,17 @@
             </div>
         </div>
     </div>
+
+    <!-- 历史记录抽屉 -->
+    <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeHistoryDrawer()"></div>
+    <aside class="drawer" id="historyDrawer" role="dialog" aria-modal="true" aria-label="历史记录">
+        <div class="drawer-head">
+            <span class="drawer-title"><i class="fa-solid fa-clock-rotate-left"></i> 历史记录</span>
+            <button class="drawer-close" onclick="closeHistoryDrawer()" aria-label="关闭"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="drawer-body" id="historyList"></div>
+        <div class="drawer-foot" id="historyFoot"></div>
+    </aside>
 
     <!-- 图集下载格式二级菜单（body 级浮层） -->
     <div class="dl-menu" id="dlMenu" role="menu" aria-label="选择下载格式"></div>
