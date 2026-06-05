@@ -43,7 +43,6 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Context
 
 from .resolver import resolve_douyin, resolve_xiaohongshu, resolve_generic
-from .douyin_processor import DouyinProcessor
 
 # 创建 MCP 服务器实例
 mcp = FastMCP("百分百一键去水印",
@@ -92,28 +91,25 @@ async def extract_douyin_text(
 
     参数:
     - share_link: 抖音分享链接或包含链接的文本
-    - model: 语音识别模型（可选，默认使用paraformer-v2）
+    - model: 语音识别模型（可选，默认按后端自动选择）
 
     返回:
     - 提取的文本内容
 
-    注意: 需要设置环境变量 DASHSCOPE_API_KEY
+    注意: 需要设置环境变量 DASHSCOPE_API_KEY（百炼后端）或 SILICONFLOW_API_KEY（硅基流动后端）。
+    通过环境变量 ASR_BACKEND 可切换后端（默认 dashscope）。
     """
     try:
-        # 从环境变量获取API密钥
-        api_key = os.getenv('DASHSCOPE_API_KEY')
-        if not api_key:
-            raise ValueError("未设置环境变量 DASHSCOPE_API_KEY，请在配置中添加阿里云百炼API密钥")
+        from .douyin_processor import DouyinProcessor
+        from .transcription import transcribe_video_url
 
-        processor = DouyinProcessor(api_key, model)
+        processor = DouyinProcessor("")
 
-        # 解析视频链接
         ctx.info("正在解析抖音分享链接...")
         video_info = processor.parse_share_url(share_link)
 
-        # 直接使用视频URL进行文本提取
         ctx.info("正在从视频中提取文本...")
-        text_content = processor.extract_text_from_video_url(video_info['url'])
+        text_content = transcribe_video_url(video_info['url'], model=model)
 
         ctx.info("文本提取完成!")
         return text_content
@@ -185,7 +181,9 @@ def watermark_removal_guide() -> str:
 
 ## 环境变量配置
 视频文本转写功能需要设置以下环境变量：
-- `DASHSCOPE_API_KEY`: 阿里云百炼API密钥（仅文本转写功能需要，链接解析无需密钥）
+- `DASHSCOPE_API_KEY`: 阿里云百炼API密钥（默认后端，仅文本转写功能需要，链接解析无需密钥）
+- `SILICONFLOW_API_KEY`: 硅基流动API密钥（可选后端）
+- `ASR_BACKEND`: 可选 `dashscope`（默认）或 `siliconflow`，切换转写后端
 
 ## 使用步骤
 1. 复制抖音/小红书的分享链接（或包含链接的文本）
@@ -212,7 +210,9 @@ def watermark_removal_guide() -> str:
       "command": "uvx",
       "args": ["wanyi-watermark"],
       "env": {
-        "DASHSCOPE_API_KEY": "your-dashscope-api-key-here"
+        "DASHSCOPE_API_KEY": "your-dashscope-api-key-here",
+        "SILICONFLOW_API_KEY": "your-siliconflow-key-here (可选)",
+        "ASR_BACKEND": "dashscope"
       }
     }
   }
@@ -233,7 +233,7 @@ def watermark_removal_guide() -> str:
 - ✅ 链接解析无需密钥：视频/图片资源提取完全免费，无需任何 API 配置
 - ✅ 智能类型识别：自动判断内容类型（视频/图文），无需手动指定
 - ✅ 多格式支持：小红书图文提供 WebP（快速预览）和 PNG（高清编辑）双格式
-- ✅ 高精度文本转写：使用阿里云百炼 paraformer-v2 模型，识别准确率高
+- ✅ 高精度文本转写：支持阿里云百炼 paraformer-v2 与硅基流动 SenseVoice 双后端
 - ✅ 多平台兼容：支持抖音、小红书，并提供通用解析兜底机制
 """
 

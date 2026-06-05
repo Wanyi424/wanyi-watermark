@@ -46,4 +46,7 @@ htmlcov/
 
 .claude
 temp/
-.venv/
+
+# Local
+.env
+output/

@@ -602,7 +602,7 @@
                 <button class="m-close" onclick="closeModal()" aria-label="关闭"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body">
-                <p class="desc">「提取文案」需要阿里云百炼 <code>DASHSCOPE_API_KEY</code>。密钥仅保存在<strong>本浏览器</strong>，不会上传服务器存储。</p>
+                <p class="desc" id="modalKeyDesc">「提取文案」当前后端为<strong>阿里云百炼</strong>，请填写 <code>DASHSCOPE_API_KEY</code>。密钥仅保存在<strong>本浏览器</strong>。</p>
                 <div class="key-shell">
                     <input type="password" id="apiKeyInput" placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off" spellcheck="false" oninput="onKeyInput()" aria-label="API Key 输入框">
                     <div class="key-tools">
@@ -619,7 +619,7 @@
                 </div>
                 <div class="modal-hint">
                     <i class="fa-solid fa-up-right-from-square"></i>
-                    获取地址：<a href="https://help.aliyun.com/zh/model-studio/get-api-key" target="_blank" rel="noopener">阿里云百炼控制台</a>
+                    获取地址：<a id="modalKeyLink" href="https://help.aliyun.com/zh/model-studio/get-api-key" target="_blank" rel="noopener">阿里云百炼控制台</a>
                 </div>
                 <div class="modal-actions">
                     <button class="btn btn-ghost" onclick="closeModal()">取消</button>
@@ -694,7 +694,11 @@
         "use strict";
 
         const KEY_STORE = "wanyi_dashscope_key";   // localStorage key（契约，勿改）
+        const SF_KEY_STORE = "wanyi_siliconflow_key";
         let serverKeyConfigured = false;
+        let serverBackendDefault = "dashscope";
+        let serverDashscopeConfigured = false;
+        let serverSiliconflowConfigured = false;
         let lastTranscript = "";
         let lastTranscriptTitle = "";
         let galleryImages = [];   // 当前图集（供下载菜单 / 一键下载全部使用）
@@ -780,7 +784,13 @@
         function escapeAttr(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;"); }
         function jsStr(s) { return JSON.stringify(String(s == null ? "" : s)).replace(/</g, "\\u003c"); }
         function getKey() { return localStorage.getItem(KEY_STORE) || ""; }
-        function hasKey() { return serverKeyConfigured || !!getKey(); }
+        function getSfKey() { return localStorage.getItem(SF_KEY_STORE) || ""; }
+        function getEffectiveBackend() { return serverBackendDefault || "dashscope"; }
+        function hasKey() {
+            const be = getEffectiveBackend();
+            if (be === "siliconflow") return serverSiliconflowConfigured || !!getSfKey();
+            return serverDashscopeConfigured || !!getKey();
+        }
 
         // 跨域资源走同源代理（图片显示/视频播放/真实下载）。图片与代理问题本期暂搁置，保留实现。
         function proxyUrl(u, download, filename) {
@@ -807,15 +817,25 @@
             const chip = $("apiChip"), text = $("apiChipText");
             if (hasKey()) {
                 chip.classList.add("ok");
-                text.textContent = serverKeyConfigured && !getKey() ? "API 已就绪（服务端）" : "API 已配置";
+                const be = getEffectiveBackend();
+                const label = be === "siliconflow" ? "硅基流动" : "百炼";
+                const isServer = be === "siliconflow" ? (serverSiliconflowConfigured && !getSfKey()) : (serverDashscopeConfigured && !getKey());
+                text.textContent = isServer ? "API 已就绪（服务端·" + label + "）" : "API 已配置（" + label + "）";
             } else { chip.classList.remove("ok"); text.textContent = "API 未配置"; }
         }
 
         /* ---------- API Key 弹窗 ---------- */
         function openModal() {
-            $("apiKeyInput").value = getKey();
+            const be = getEffectiveBackend();
+            const isSf = be === "siliconflow";
+            $("apiKeyInput").value = isSf ? getSfKey() : getKey();
             $("apiKeyInput").type = "password";
             $("keyToggle").querySelector("i").className = "fa-solid fa-eye";
+            $("modalKeyDesc").innerHTML = isSf
+                ? '「提取文案」当前后端为<strong>硅基流动 SenseVoice</strong>，请填写 <code>SILICONFLOW_API_KEY</code>。密钥仅保存在<strong>本浏览器</strong>。'
+                : '「提取文案」当前后端为<strong>阿里云百炼</strong>，请填写 <code>DASHSCOPE_API_KEY</code>。密钥仅保存在<strong>本浏览器</strong>。';
+            $("modalKeyLink").href = isSf ? "https://cloud.siliconflow.cn/" : "https://help.aliyun.com/zh/model-studio/get-api-key";
+            $("modalKeyLink").textContent = isSf ? "硅基流动控制台" : "阿里云百炼控制台";
             onKeyInput();
             $("modalBg").classList.add("show");
             setTimeout(() => $("apiKeyInput").focus(), 50);
@@ -825,13 +845,16 @@
         function onKeyInput() {
             const v = $("apiKeyInput").value.trim();
             const box = $("keyStatus");
-            const stored = getKey();
+            const be = getEffectiveBackend();
+            const isSf = be === "siliconflow";
+            const stored = isSf ? getSfKey() : getKey();
+            const svrOk = isSf ? serverSiliconflowConfigured : serverDashscopeConfigured;
             if (v) {
                 box.classList.add("on");
                 box.querySelector(".ks-dot i").className = "fa-solid fa-circle-check";
                 $("keyStatusTitle").textContent = "API Key 已填写";
                 $("keyStatusSub").textContent = "保存后即可使用「提取文案」";
-            } else if (serverKeyConfigured) {
+            } else if (svrOk) {
                 box.classList.add("on");
                 box.querySelector(".ks-dot i").className = "fa-solid fa-server";
                 $("keyStatusTitle").textContent = "服务端已配置密钥";
@@ -852,11 +875,18 @@
         function clearKeyInput() { $("apiKeyInput").value = ""; onKeyInput(); $("apiKeyInput").focus(); }
         function saveKey() {
             const v = $("apiKeyInput").value.trim();
-            if (v) { localStorage.setItem(KEY_STORE, v); toast("API Key 已保存"); }
-            else { localStorage.removeItem(KEY_STORE); toast("已清空本地密钥"); }
+            const be = getEffectiveBackend();
+            const store = be === "siliconflow" ? SF_KEY_STORE : KEY_STORE;
+            if (v) { localStorage.setItem(store, v); toast("API Key 已保存"); }
+            else { localStorage.removeItem(store); toast("已清空本地密钥"); }
             refreshChip(); closeModal();
         }
-        function clearStoredKey() { localStorage.removeItem(KEY_STORE); $("apiKeyInput").value = ""; onKeyInput(); refreshChip(); toast("已清除已保存的密钥"); }
+        function clearStoredKey() {
+            const be = getEffectiveBackend();
+            const store = be === "siliconflow" ? SF_KEY_STORE : KEY_STORE;
+            localStorage.removeItem(store);
+            $("apiKeyInput").value = ""; onKeyInput(); refreshChip(); toast("已清除已保存的密钥");
+        }
 
         /* ---------- 帮助 / 灯箱 ---------- */
         function openHelp() { $("helpBg").classList.add("show"); }
@@ -1363,11 +1393,18 @@
             const url = $("linkInput").value.trim();
             clearAlert();
             if (!url) { showAlert("请先粘贴分享链接再试。", { type: "warn", title: "还没有链接" }); $("linkInput").focus(); return; }
-            if (!hasKey()) { showAlert("「提取文案」需要先配置阿里云百炼 API Key，已为你打开配置窗口。", { type: "warn", title: "需要 API Key" }); openModal(); return; }
+            if (!hasKey()) {
+                const be = getEffectiveBackend();
+                const label = be === "siliconflow" ? "硅基流动 API Key" : "阿里云百炼 API Key";
+                showAlert("「提取文案」需要先配置" + label + "，已为你打开配置窗口。", { type: "warn", title: "需要 API Key" }); openModal(); return;
+            }
             setLoading("extractBtn", true);
             showSkeleton("extract");
             try {
-                const r = await fetch("/api/extract", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url, api_key: getKey() }) });
+                const be = getEffectiveBackend();
+                const key = be === "siliconflow" ? getSfKey() : getKey();
+                const payload = { url, api_key: key, backend: be };
+                const r = await fetch("/api/extract", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
                 const data = await r.json();
                 if (!r.ok || data.status === "error") { $("resultBox").innerHTML = ""; showAlert(data.error || ("提取失败（HTTP " + r.status + "）"), { title: "提取失败" }); }
                 else renderTranscript(data);
@@ -1384,7 +1421,13 @@
 
         /* ---------- 初始化 ---------- */
         async function initHealth() {
-            try { const r = await fetch("/api/health"); const d = await r.json(); serverKeyConfigured = !!d.api_key_configured; } catch (e) {}
+            try {
+                const r = await fetch("/api/health"); const d = await r.json();
+                serverKeyConfigured = !!d.api_key_configured;
+                serverBackendDefault = d.asr_backend_default || "dashscope";
+                serverDashscopeConfigured = !!d.dashscope_api_key_configured;
+                serverSiliconflowConfigured = !!d.siliconflow_api_key_configured;
+            } catch (e) {}
             refreshChip();
         }
 

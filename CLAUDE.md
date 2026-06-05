@@ -67,10 +67,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 小红书: 一次抓取页面后结合最终 URL `type`、`window.__INITIAL_STATE__`、`og:video`、`masterUrl` / `backupUrls` 和图片列表判断类型并提取资源
 - 小红书视频候选只做协议规范化与来源评分,不再改写 114 质量码、不再做阻塞式 HEAD 探测
 
-**文本提取:**
-- 使用 dashscope.audio.asr.Transcription 异步 API
-- 直接传入视频 URL,无需本地下载
-- 默认模型: `paraformer-v2`
+**文本提取（双 ASR 后端）:**
+- **dashscope（默认）**: 阿里云百炼 paraformer-v2，URL 直传，无需本地下载
+- **siliconflow**: 硅基流动 SenseVoice，需下载视频 + ffmpeg 提取音频；系统无 ffmpeg 时使用 `imageio-ffmpeg` 内置二进制，大文件（>1h 或 >50MB）自动按 540s/段分割
+- 统一入口: `transcription.transcribe_video_url(backend=...)`
+- 后端选择优先级: 显式参数 > 环境变量 `ASR_BACKEND` > 默认 `dashscope`
 
 ## 常用命令
 
@@ -97,6 +98,10 @@ python -m wanyi_watermark.cli -l "<分享链接>" -a info
 python -m wanyi_watermark.cli -l "<分享链接>" -a download -o ./output
 export DASHSCOPE_API_KEY="sk-xxx"
 python -m wanyi_watermark.cli -l "<分享链接>" -a extract -o ./output
+
+# 使用硅基流动 SenseVoice 后端提取文案（系统无 ffmpeg 时使用 imageio-ffmpeg 兜底）
+export SILICONFLOW_API_KEY="sk-xxx"
+python -m wanyi_watermark.cli -l "<分享链接>" -a extract -b siliconflow -o ./output
 
 # WebUI：浏览器界面，默认 http://localhost:8080
 python web/app.py
@@ -139,8 +144,11 @@ uvx wanyi-watermark
 
 ## 环境变量
 
-- `DASHSCOPE_API_KEY`: 阿里云百炼 API 密钥(文本提取功能必需)
+- `DASHSCOPE_API_KEY`: 阿里云百炼 API 密钥（dashscope 后端文本提取必需）
   - 获取地址: https://help.aliyun.com/zh/model-studio/get-api-key
+- `SILICONFLOW_API_KEY`: 硅基流动 API 密钥（siliconflow 后端文本提取必需）
+  - 获取地址: https://cloud.siliconflow.cn/
+- `ASR_BACKEND`: 默认 ASR 后端，可选 `dashscope`（默认）或 `siliconflow`
 
 ## 重要注意事项
 
@@ -177,10 +185,11 @@ uvx wanyi-watermark
 本仓基于上游 `douyin-mcp-server` 二开，采用 **「二开为主干 + 跟踪上游」** 策略。
 上游同步、文件映射表、待回迁 backlog、技术债清单统一记录在 **[`UPSTREAM_SYNC.md`](./UPSTREAM_SYNC.md)**。
 
-**本阶段【暂不实现】、已在代码内留 `TODO(upstream-backport, ...)` 的延后项：**
-- 硅基流动 SenseVoice 可选 ASR 后端 → `transcription.py`
-- 大文件自动分段转写 → `transcription.py`（注：百炼 URL 直传可能已原生支持长音频，需先验证）
-- CLI 下载复用 WebUI 媒体代理/Referer 逻辑 → `cli.py`（WebUI 代理已落地）
+**本阶段上游回迁状态：**
+- ~~硅基流动 SenseVoice 可选 ASR 后端 → `transcription.py`~~ ✅ 已实现（`siliconflow_asr.py`）
+- ~~大文件自动分段转写 → `transcription.py`~~ ✅ 已实现（siliconflow 后端自动分段，>1h 或 >50MB）
+- ~~服务端媒体代理（带 Referer 解决 403）→ `web/app.py`~~ ✅ 已实现，并抽出 `media_fetch.py` 供 WebUI 与 siliconflow 本地下载共用
+- 普通 CLI 下载复用 `media_fetch.py` 仍是后续治理项（`cli.py` 当前保留直连下载逻辑）
 
 改动上述方向前，请先阅读 `UPSTREAM_SYNC.md`。
 
