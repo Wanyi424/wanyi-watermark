@@ -11,13 +11,18 @@
   SILICONFLOW_API_KEY — 硅基流动 API 密钥
 """
 
+import json
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
 
 import requests
+
+from .media_fetch import FetchError, fetch_media_stream
 
 SILICONFLOW_API_URL = "https://api.siliconflow.cn/v1/audio/transcriptions"
 SILICONFLOW_DEFAULT_MODEL = "FunAudioLLM/SenseVoiceSmall"
@@ -25,13 +30,6 @@ SILICONFLOW_DEFAULT_MODEL = "FunAudioLLM/SenseVoiceSmall"
 MAX_DURATION = 3600
 MAX_SIZE = 50 * 1024 * 1024
 SEGMENT_DURATION = 540
-
-_DOWNLOAD_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 "
-        "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-    ),
-}
 
 
 def transcribe_video_url_siliconflow(
@@ -73,34 +71,44 @@ def transcribe_video_url_siliconflow(
 
 
 def _download_video(url: str, dest: Path, show_progress: bool) -> Path:
-    resp = requests.get(url, headers=_DOWNLOAD_HEADERS, stream=True, timeout=60, allow_redirects=True)
-    resp.raise_for_status()
-    total = int(resp.headers.get("content-length", 0))
-    done = 0
-    with open(dest, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
-                done += len(chunk)
-                if show_progress and total > 0:
-                    print(f"\r  [siliconflow] 下载视频: {done / total * 100:.1f}%", end="", flush=True)
-    if show_progress:
-        print(f"\r  [siliconflow] 视频下载完成 ({done / 1024 / 1024:.1f} MB)        ")
+    try:
+        resp = fetch_media_stream(url, timeout=60, max_retries=2)
+    except FetchError as e:
+        raise RuntimeError(
+            "下载源视频失败，已按平台补充 Referer/UA 并重试；"
+            f"请检查资源链接是否过期或源站是否临时拦截：{e}"
+        ) from e
+
+    try:
+        total = int(resp.headers.get("content-length", 0))
+        done = 0
+        with open(dest, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    done += len(chunk)
+                    if show_progress and total > 0:
+                        print(f"\r  [siliconflow] 下载视频: {done / total * 100:.1f}%", end="", flush=True)
+        if show_progress:
+            print(f"\r  [siliconflow] 视频下载完成 ({done / 1024 / 1024:.1f} MB)        ")
+    finally:
+        resp.close()
     return dest
 
 
 def _extract_audio(video_path: Path, show_progress: bool) -> Path:
-    import ffmpeg as ff
-
     audio_path = video_path.with_suffix(".mp3")
     if show_progress:
         print("  [siliconflow] 正在提取音频...")
     try:
-        (
-            ff.input(str(video_path))
-            .output(str(audio_path), acodec="libmp3lame", q=0)
-            .run(capture_stdout=True, capture_stderr=True, overwrite_output=True)
-        )
+        _run_ffmpeg([
+            "-y",
+            "-i", str(video_path),
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-q:a", "0",
+            str(audio_path),
+        ], "提取音频")
     except Exception as e:
         raise RuntimeError(f"ffmpeg 提取音频失败: {e}") from e
     if show_progress:
@@ -110,20 +118,16 @@ def _extract_audio(video_path: Path, show_progress: bool) -> Path:
 
 def _get_audio_info(audio_path: Path) -> tuple:
     """返回 (duration_seconds, size_bytes)。"""
-    import ffmpeg as ff
-
+    size = audio_path.stat().st_size
     try:
-        probe = ff.probe(str(audio_path))
-        duration = float(probe["format"].get("duration", 0))
+        duration = _probe_duration(audio_path)
     except Exception:
         duration = 0
-    return duration, audio_path.stat().st_size
+    return duration, size
 
 
 def _split_audio(audio_path: Path, tmp_dir: Path, show_progress: bool) -> list:
     """按 SEGMENT_DURATION 切割，返回分段路径列表。"""
-    import ffmpeg as ff
-
     duration, _ = _get_audio_info(audio_path)
     if duration <= SEGMENT_DURATION:
         return [audio_path]
@@ -138,11 +142,15 @@ def _split_audio(audio_path: Path, tmp_dir: Path, show_progress: bool) -> list:
     while current < duration:
         seg_path = tmp_dir / f"segment_{idx}.mp3"
         try:
-            (
-                ff.input(str(audio_path), ss=current, t=SEGMENT_DURATION)
-                .output(str(seg_path), acodec="libmp3lame", q=0)
-                .run(capture_stdout=True, capture_stderr=True, overwrite_output=True)
-            )
+            _run_ffmpeg([
+                "-y",
+                "-ss", str(current),
+                "-t", str(SEGMENT_DURATION),
+                "-i", str(audio_path),
+                "-acodec", "libmp3lame",
+                "-q:a", "0",
+                str(seg_path),
+            ], f"分割音频段 {idx}")
         except Exception as e:
             raise RuntimeError(f"分割音频段 {idx} 失败: {e}") from e
         segments.append(seg_path)
@@ -150,6 +158,74 @@ def _split_audio(audio_path: Path, tmp_dir: Path, show_progress: bool) -> list:
         idx += 1
 
     return segments
+
+
+def _ffmpeg_exe() -> str:
+    """返回可执行 ffmpeg 路径，优先系统安装，缺省使用 imageio-ffmpeg 内置二进制。"""
+    configured = os.getenv("WANYI_FFMPEG_BINARY")
+    if configured:
+        path = Path(configured)
+        if path.exists():
+            return str(path)
+        raise RuntimeError(f"WANYI_FFMPEG_BINARY 指向的文件不存在: {configured}")
+
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+
+    try:
+        import imageio_ffmpeg
+    except ImportError as e:
+        raise RuntimeError(
+            "未找到 ffmpeg 可执行文件。请安装 ffmpeg 并加入 PATH，或安装 imageio-ffmpeg 依赖。"
+        ) from e
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def _ffprobe_exe() -> Optional[str]:
+    configured = os.getenv("WANYI_FFPROBE_BINARY")
+    if configured:
+        return configured if Path(configured).exists() else None
+    return shutil.which("ffprobe")
+
+
+def _run_ffmpeg(args: list[str], action: str) -> subprocess.CompletedProcess:
+    cmd = [_ffmpeg_exe(), *args]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if len(stderr) > 1200:
+            stderr = stderr[-1200:]
+        raise RuntimeError(f"{action}失败: {stderr or 'ffmpeg 返回非零退出码'}")
+    return result
+
+
+def _probe_duration(audio_path: Path) -> float:
+    ffprobe = _ffprobe_exe()
+    if ffprobe:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout or "{}")
+            return float((data.get("format") or {}).get("duration") or 0)
+
+    # imageio-ffmpeg 只提供 ffmpeg，没有 ffprobe；从 ffmpeg -i 输出里解析时长。
+    result = subprocess.run([_ffmpeg_exe(), "-i", str(audio_path)], capture_output=True, text=True)
+    text = (result.stderr or "") + "\n" + (result.stdout or "")
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    if not match:
+        return 0
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def _transcribe_single(audio_path: Path, api_key: str, model: str) -> str:

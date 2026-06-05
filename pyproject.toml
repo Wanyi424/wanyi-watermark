@@ -27,6 +27,7 @@ dependencies = [
     "ffmpeg-python",
     "tqdm",
     "dashscope",
+    "imageio-ffmpeg",
     # WebUI（web/app.py）所需；MCP / CLI 链路不强制依赖，但作为统一发行一并声明
     "fastapi",
     "uvicorn",

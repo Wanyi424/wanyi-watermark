@@ -46,3 +46,4 @@ htmlcov/
 
 .claude
 temp/
+.venv/
