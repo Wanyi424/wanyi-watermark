@@ -33,6 +33,7 @@ from wanyi_watermark.diagnostics import (
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import uvicorn
@@ -51,8 +52,11 @@ logging.basicConfig(
 logging.getLogger("wanyi_watermark").setLevel(_LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
+WEB_DIR = Path(__file__).parent
+
 app = FastAPI(title="百分百一键去水印", version="1.2.0")
-templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
 
 class ParseRequest(BaseModel):
