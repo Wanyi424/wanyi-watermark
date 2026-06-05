@@ -180,7 +180,7 @@ uvx wanyi-watermark
 **本阶段【暂不实现】、已在代码内留 `TODO(upstream-backport, ...)` 的延后项：**
 - 硅基流动 SenseVoice 可选 ASR 后端 → `transcription.py`
 - 大文件自动分段转写 → `transcription.py`（注：百炼 URL 直传可能已原生支持长音频，需先验证）
-- CLI 下载复用 WebUI 媒体代理/Referer 逻辑 → `cli.py`（WebUI 代理已落地）
+- ~~CLI 下载复用 WebUI 媒体代理/Referer 逻辑~~ → **已完成**：`media_fetch.py` 统一模块供 CLI 与 WebUI 共用
 
 改动上述方向前，请先阅读 `UPSTREAM_SYNC.md`。
 

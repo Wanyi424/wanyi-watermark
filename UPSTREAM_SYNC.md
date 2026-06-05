@@ -63,7 +63,7 @@
 - **重定向安全**：改为手动跟随（`allow_redirects=False` + `_MAX_REDIRECTS`），**每一跳重新执行 SSRF 校验**，防开放重定向→SSRF；按当前跳域名重选 Referer/UA。
 - **错误编码**：错误响应统一用 `PlainTextResponse`（自带 `charset=utf-8`），消除"非法或不被允许的资源地址"中文乱码。
 - **上游参考**：`web/app.py` → `GET /api/video/download`（流式 + Referer 头）。
-- **待跟进**：`wanyi_watermark/cli.py` 的下载仍直连源站（`DOWNLOAD_HEADERS`）；如遇 403 可改走相同的按域名 Referer 逻辑。
+- **已跟进**：CLI 下载已改为复用 `wanyi_watermark/media_fetch.py`（与 WebUI `/api/proxy` 共用同一套按域名选 Referer/UA + SSRF 校验 + 手动重定向逻辑），不再直连源站。
 
 ### 3.4 解析诊断与 WebUI 图集预览 —— ✅ 已落地（二开侧）
 - **解析诊断**：`web/templates/index.html` 点击解析后生成 `X-Parse-Trace-Id`，浏览器 Console 输出中文耗时表；`web/app.py` 与 `wanyi_watermark/diagnostics.py` 在后端输出同一追踪 ID 的单步/累计耗时。
