@@ -14,14 +14,12 @@
 
 import os
 import sys
-import socket
-import ipaddress
 import logging
 import time
 import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any
-from urllib.parse import urlparse, urljoin, quote
+from urllib.parse import quote
 
 # 将包根目录（mcp-server/）加入路径，便于直接 `python web/app.py` 运行
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -34,11 +32,10 @@ from wanyi_watermark.diagnostics import (
 )
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import uvicorn
-import requests
 
 _LOG_LEVEL = getattr(logging, os.getenv("WANYI_WEB_LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
@@ -174,131 +171,16 @@ async def extract_text(req: ExtractRequest) -> Dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────
 # 媒体代理 /api/proxy —— 解决跨域 + 防盗链（图片 403、强制下载、视频内嵌播放）
 # ──────────────────────────────────────────────────────────────────
-# 背景：抖音/小红书等 CDN 对图片/视频直链有 Referer 防盗链校验，浏览器从本站
-# 直接加载会 403；且跨域资源无法用前端 download 属性强制保存、视频也可能被拦。
-# 方案：由服务端按目标域名补正确的 Referer/UA 去取资源，再以【同源】方式回传给
-# 浏览器。这样图片能显示、download 属性可触发真实下载、<video> 可稳定内嵌播放
-# （透传 Range 以支持拖动）。
-#
-# 注：此前 UPSTREAM_SYNC.md 曾把"服务端下载代理"标为延后；因实测图片直接 403
-# 无法显示（前提已变），现按产品决策正式落地本端点（与硅基流动等其它延后项无关）。
-# ──────────────────────────────────────────────────────────────────
-_MOBILE_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-)
-_DESKTOP_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
-# 透传的响应头（其余一律丢弃，避免泄漏上游 Set-Cookie 等）
+from wanyi_watermark.media_fetch import fetch_media, MediaFetchError
+
 _PASS_THROUGH_HEADERS = (
     "Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Cache-Control",
 )
-_MAX_REDIRECTS = 5
-
-# Clash / sing-box 等在 Fake-IP 模式下，会把所有公网域名解析到该网段
-# （RFC 2544 基准测试段）。此时基于解析 IP 的 SSRF 过滤会失效，故对"域名解析到
-# 该段"放行，并以下方媒体域名白名单作补偿安全控制；但对"直接以 198.18.x.x 原始
-# IP 发起"的请求仍然拦截（见 _is_safe_public_url）。
-_FAKE_IP_NET = ipaddress.ip_network("198.18.0.0/15")
-
-# 媒体域名白名单（后缀匹配）：抖音/字节系、小红书及其 CDN。
-# 仅当域名在 Fake-IP 段解析时，以此作为放行依据；如需支持更多平台可在此扩充。
-_MEDIA_HOST_WHITELIST = (
-    # 抖音 / 字节系
-    "douyin.com", "iesdouyin.com", "amemv.com", "snssdk.com",
-    "douyinpic.com", "douyinvod.com", "byteimg.com", "bytecdn.com",
-    "ixigua.com", "ixiguavideo.com", "pstatp.com", "zjcdn.com",
-    # 小红书
-    "xiaohongshu.com", "xhscdn.com", "xhslink.com",
-)
-
-
-def _site_headers(host: str) -> Dict[str, str]:
-    """按目标域名选择合适的 UA 与 Referer（防盗链关键）。"""
-    host = (host or "").lower()
-    headers = {"Accept": "*/*", "Accept-Language": "zh-CN,zh;q=0.9"}
-    if any(k in host for k in ("douyin", "iesdouyin", "amemv", "bytecdn", "douyinpic", "douyinvod", "ixigua")):
-        headers["User-Agent"] = _MOBILE_UA
-        headers["Referer"] = "https://www.douyin.com/"
-    elif any(k in host for k in ("xhscdn.com", "xiaohongshu.com")):
-        headers["User-Agent"] = _DESKTOP_UA
-        headers["Referer"] = "https://www.xiaohongshu.com/"
-    else:
-        headers["User-Agent"] = _DESKTOP_UA
-    return headers
-
-
-def _host_in_whitelist(host: str) -> bool:
-    """域名后缀是否命中媒体白名单（如 ci.xiaohongshu.com 命中 xiaohongshu.com）。"""
-    host = (host or "").lower().rstrip(".")
-    return any(host == d or host.endswith("." + d) for d in _MEDIA_HOST_WHITELIST)
-
-
-def _addr_blocked(ip) -> bool:
-    """该 IP 是否属于应拦截的内网/环回/保留地址段。"""
-    return bool(
-        ip.is_private or ip.is_loopback or ip.is_link_local
-        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
-    )
 
 
 def _err(msg: str, status: int) -> PlainTextResponse:
-    """统一错误响应：PlainTextResponse 自带 charset=utf-8，避免中文乱码。"""
+    """统一错误响应。"""
     return PlainTextResponse(msg, status_code=status)
-
-
-def _is_safe_public_url(url: str) -> bool:
-    """基础 SSRF 防护：仅允许 http/https，且目标不得指向内网/环回地址。
-
-    兼容 Clash / sing-box 的 Fake-IP 模式：
-    - 直接以【字面 IP】访问 → 严格拦截内网/保留段（含 198.18.0.0/15），
-      故 http://198.18.x.x 这类原始 IP 一律拒绝；
-    - 以【域名】访问 → 解析后逐地址校验；若解析落在 Fake-IP 段（198.18/15），
-      则改用媒体域名白名单作为放行依据（此时 IP 过滤已失效），
-      其余真实内网段仍然拦截。
-
-    说明：面向本地 WebUI 的基础防护，未处理 DNS rebinding 等高级场景。
-    """
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return False
-    if parsed.scheme not in ("http", "https"):
-        return False
-    host = parsed.hostname
-    if not host:
-        return False
-
-    # 字面 IP 直连：严格拦截内网/保留段（含 Fake-IP 段 198.18/15），不放行
-    try:
-        literal = ipaddress.ip_address(host)
-        return not _addr_blocked(literal)
-    except ValueError:
-        pass  # host 为域名，继续解析校验
-
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except Exception:
-        return False
-    if not infos:
-        return False
-
-    whitelisted = _host_in_whitelist(host)
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        if ip.version == 4 and ip in _FAKE_IP_NET:
-            # Fake-IP 段：IP 过滤失效，仅放行白名单内的媒体域名
-            if not whitelisted:
-                return False
-            continue
-        if _addr_blocked(ip):
-            return False
-    return True
 
 
 @app.get("/api/proxy")
@@ -310,43 +192,12 @@ def media_proxy(request: Request, url: str, download: int = 0, filename: str = "
         download: 1 时附加 Content-Disposition 触发浏览器下载
         filename: 下载时的文件名（可选）
     """
-    if not _is_safe_public_url(url):
-        return _err("非法或不被允许的资源地址", 400)
-
-    # 透传 Range，支持视频拖动 / 断点续传
     rng = request.headers.get("range")
 
-    # 手动跟随重定向：每一跳都重新执行 SSRF 校验（防开放重定向 → SSRF），
-    # 并按当前域名重新选择 Referer/UA。
-    current = url
-    upstream = None
     try:
-        for _ in range(_MAX_REDIRECTS + 1):
-            if not _is_safe_public_url(current):
-                return _err("重定向目标不被允许", 400)
-            req_headers = _site_headers(urlparse(current).hostname)
-            if rng:
-                req_headers["Range"] = rng
-            resp = requests.get(current, headers=req_headers, stream=True, timeout=30, allow_redirects=False)
-            if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
-                nxt = urljoin(current, resp.headers["Location"])
-                resp.close()
-                current = nxt
-                continue
-            upstream = resp
-            break
-        else:
-            return _err("重定向次数过多", 502)
-    except Exception as e:
-        return _err(f"上游资源请求失败: {e}", 502)
-
-    if upstream is None:
-        return _err("重定向次数过多", 502)
-
-    if upstream.status_code >= 400:
-        code = upstream.status_code
-        upstream.close()
-        return _err(f"上游资源返回 {code}", code)
+        upstream = fetch_media(url, range_header=rng)
+    except MediaFetchError as e:
+        return _err(e.message, e.status_code)
 
     resp_headers = {}
     for h in _PASS_THROUGH_HEADERS:
@@ -356,7 +207,6 @@ def media_proxy(request: Request, url: str, download: int = 0, filename: str = "
 
     if download:
         safe_name = filename or "download"
-        # RFC 5987：用 filename* 携带 UTF-8 文件名，兼容中文
         resp_headers["Content-Disposition"] = (
             "attachment; filename=\"download\"; filename*=UTF-8''" + quote(safe_name)
         )
@@ -373,7 +223,7 @@ def media_proxy(request: Request, url: str, download: int = 0, filename: str = "
 
     return StreamingResponse(
         _iter(),
-        status_code=upstream.status_code,   # 透传 200 / 206
+        status_code=upstream.status_code,
         headers=resp_headers,
         media_type=media_type,
     )

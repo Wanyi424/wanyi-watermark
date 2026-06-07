@@ -32,28 +32,13 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-# 下载用请求头（桌面端浏览器 UA）。
-# TODO(upstream-backport, download-proxy): 个别 CDN 对直链下载有 Referer / 防盗链校验，
-#   可能返回 403。上游在 WebUI 侧实现了带 Referer 的服务端下载代理（见
-#   douyin-mcp-server-origin/web/app.py: download_video）。本阶段暂不接入，
-#   如遇 403 可后续按平台补充 Referer。详见 UPSTREAM_SYNC.md。
-DOWNLOAD_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "*/*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-}
+from .media_fetch import fetch_media, MediaFetchError
 
 
 def _download_file(url: str, dest: Path, show_progress: bool = True) -> Path:
-    """流式下载单个文件到 dest。"""
-    import requests
-
+    """流式下载单个文件到 dest（自动按域名选 UA/Referer 绕过防盗链）。"""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    resp = requests.get(url, headers=DOWNLOAD_HEADERS, stream=True, timeout=30, allow_redirects=True)
-    resp.raise_for_status()
+    resp = fetch_media(url, stream=True)
 
     total = int(resp.headers.get("content-length", 0))
     done = 0
@@ -64,6 +49,7 @@ def _download_file(url: str, dest: Path, show_progress: bool = True) -> Path:
                 done += len(chunk)
                 if show_progress and total > 0:
                     print(f"\r  下载进度: {done / total * 100:.1f}%", end="", flush=True)
+    resp.close()
     if show_progress:
         print(f"\r  已保存: {dest}                ")
     return dest

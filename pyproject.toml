@@ -33,6 +33,9 @@ dependencies = [
     "jinja2",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest", "responses", "httpx"]
+
 [project.urls]
 Homepage = "https://github.com/Ryan7t/wanyi-watermark"
 Repository = "https://github.com/Ryan7t/wanyi-watermark"
