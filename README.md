@@ -88,9 +88,33 @@
 
 > **注意**: `DASHSCOPE_API_KEY` 仅用于视频文本转写功能,链接解析和资源提取无需 API 密钥。
 
+### SiliconFlow 后端（可选）
+
+除默认的百炼后端外,还可选择硅基流动 SenseVoice 作为转写后端:
+
+- ✅ 无需阿里云账号,适合百炼不可用的场景
+- ✅ 大文件自动分段转写（>1小时或>50MB 自动按 9 分钟切割）
+- ⚠️ 需要本地安装 ffmpeg（用于音频提取和分段）
+- ⚠️ 需要先下载视频到本地,对带宽和磁盘有一定要求
+
+**配置步骤:**
+1. 前往 [硅基流动](https://cloud.siliconflow.cn/) 注册并获取 API Key
+2. 配置环境变量 `SILICONFLOW_API_KEY`
+3. 确保本地已安装 ffmpeg (`ffmpeg -version` 验证)
+
+**CLI 使用示例:**
+```bash
+export SILICONFLOW_API_KEY="sk-xxxx"
+python -m wanyi_watermark.cli -l "<分享链接>" -a extract --backend siliconflow -o ./output
+```
+
+> SiliconFlow 后端仅通过 CLI 的 `--backend siliconflow` 参数启用,MCP 工具默认仍使用百炼。
+
 ### 获取 API 密钥(可选)
 
-如果需要使用视频文本转写功能,请前往 [阿里云百炼](https://help.aliyun.com/zh/model-studio/get-api-key) 获取 API 密钥。
+如果需要使用视频文本转写功能:
+- **百炼后端(默认):** 前往 [阿里云百炼](https://help.aliyun.com/zh/model-studio/get-api-key) 获取 `DASHSCOPE_API_KEY`
+- **SiliconFlow 后端:** 前往 [硅基流动](https://cloud.siliconflow.cn/) 获取 `SILICONFLOW_API_KEY`
 
 ## 🛠️ 工具说明
 

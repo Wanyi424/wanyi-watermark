@@ -5,7 +5,7 @@
 支持抖音 / 小红书 / 通用平台的无水印资源解析、下载与文案提取：
 1. 解析链接（自动识别平台与 视频/图文 类型）
 2. 下载无水印视频 / 图集
-3. 提取视频文案（阿里云百炼，需 DASHSCOPE_API_KEY）
+3. 提取视频文案（支持百炼/硅基流动两种后端）
 
 与 MCP 工具、WebUI、Skill 共用同一套解析门面（resolver.py）与转写服务（transcription.py）。
 
@@ -16,9 +16,13 @@
   # 下载无水印视频 / 图集到指定目录
   python -m wanyi_watermark.cli -l "<分享链接>" -a download -o ./output
 
-  # 提取视频文案并保存为 Markdown（需 DASHSCOPE_API_KEY）
+  # 提取视频文案并保存为 Markdown（默认百炼，需 DASHSCOPE_API_KEY）
   export DASHSCOPE_API_KEY="sk-xxx"
   python -m wanyi_watermark.cli -l "<分享链接>" -a extract -o ./output
+
+  # 使用硅基流动后端提取文案（需 SILICONFLOW_API_KEY + 本地 ffmpeg）
+  export SILICONFLOW_API_KEY="sk-xxx"
+  python -m wanyi_watermark.cli -l "<分享链接>" -a extract -o ./output --backend siliconflow
 
   # 提取文案并同时保存视频
   python -m wanyi_watermark.cli -l "<分享链接>" -a extract -o ./output --save-video
@@ -132,7 +136,7 @@ def cmd_download(link: str, output: str) -> int:
     return 0
 
 
-def cmd_extract(link: str, output: Optional[str], save_video: bool, model: Optional[str]) -> int:
+def cmd_extract(link: str, output: Optional[str], save_video: bool, model: Optional[str], backend: str) -> int:
     from .resolver import resolve_media
     from .transcription import transcribe_video_url
 
@@ -144,8 +148,9 @@ def cmd_extract(link: str, output: Optional[str], save_video: bool, model: Optio
         print("文案提取仅支持视频类型链接（当前为图文）。", file=sys.stderr)
         return 1
 
-    print("正在从视频中提取文案（阿里云百炼）...")
-    text = transcribe_video_url(data["url"], model=model)
+    backend_label = "硅基流动 SenseVoice" if backend == "siliconflow" else "阿里云百炼"
+    print(f"正在从视频中提取文案（{backend_label}）...")
+    text = transcribe_video_url(data["url"], model=model, backend=backend)
 
     name = _resource_name(data)
     print("\n" + "=" * 56)
@@ -190,7 +195,10 @@ def main() -> None:
     parser.add_argument("--action", "-a", choices=["info", "download", "extract"],
                         default="info", help="操作类型: info(解析信息) / download(下载资源) / extract(提取文案)")
     parser.add_argument("--output", "-o", default="./output", help="输出目录 (默认 ./output)")
-    parser.add_argument("--model", "-m", help="语音识别模型 (可选，默认 paraformer-v2)")
+    parser.add_argument("--model", "-m", help="语音识别模型 (可选，默认取决于 backend)")
+    parser.add_argument("--backend", "-b", choices=["dashscope", "siliconflow"],
+                        default="dashscope",
+                        help="转写后端: dashscope(默认,URL直传) / siliconflow(本地分段,需 ffmpeg)")
     parser.add_argument("--save-video", "-v", action="store_true", help="提取文案时同时保存视频")
 
     args = parser.parse_args()
@@ -201,7 +209,7 @@ def main() -> None:
         elif args.action == "download":
             code = cmd_download(args.link, args.output)
         else:  # extract
-            code = cmd_extract(args.link, args.output, args.save_video, args.model)
+            code = cmd_extract(args.link, args.output, args.save_video, args.model, args.backend)
         sys.exit(code)
     except KeyboardInterrupt:
         print("\n已取消。", file=sys.stderr)

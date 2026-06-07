@@ -32,7 +32,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `detect_platform`：按域名判定 douyin / xiaohongshu / generic
 
 `server.py` 的工具均为薄包装：`json.dumps(resolve_*(...))`。
-转写逻辑统一在 `transcription.py`（`transcribe_video_url`，dashscope）。
+转写逻辑统一在 `transcription.py`（`transcribe_video_url`），支持两种后端：
+- **dashscope**（默认）：百炼 paraformer-v2，URL 直传
+- **siliconflow**（CLI `--backend siliconflow`）：硅基流动 SenseVoice，本地下载+ffmpeg抽音频+大文件分段
+
 > 处理器在 resolver 内部**延迟导入**，保持 `import resolver` 轻量（不强依赖 dashscope/ffmpeg）。
 
 ### 2. MCP 服务器 (`server.py`)
@@ -92,6 +95,10 @@ python -m wanyi_watermark.cli -l "<分享链接>" -a download -o ./output
 export DASHSCOPE_API_KEY="sk-xxx"
 python -m wanyi_watermark.cli -l "<分享链接>" -a extract -o ./output
 
+# 使用硅基流动后端提取文案（需 SILICONFLOW_API_KEY + 本地 ffmpeg）
+export SILICONFLOW_API_KEY="sk-xxx"
+python -m wanyi_watermark.cli -l "<分享链接>" -a extract -o ./output --backend siliconflow
+
 # WebUI：浏览器界面，默认 http://localhost:8080
 python web/app.py
 
@@ -133,8 +140,10 @@ uvx wanyi-watermark
 
 ## 环境变量
 
-- `DASHSCOPE_API_KEY`: 阿里云百炼 API 密钥(文本提取功能必需)
+- `DASHSCOPE_API_KEY`: 阿里云百炼 API 密钥（默认转写后端必需）
   - 获取地址: https://help.aliyun.com/zh/model-studio/get-api-key
+- `SILICONFLOW_API_KEY`: 硅基流动 API 密钥（使用 `--backend siliconflow` 时必需）
+  - 获取地址: https://cloud.siliconflow.cn/
 
 ## 重要注意事项
 
@@ -166,9 +175,11 @@ uvx wanyi-watermark
 上游同步、文件映射表、待回迁 backlog、技术债清单统一记录在 **[`UPSTREAM_SYNC.md`](./UPSTREAM_SYNC.md)**。
 
 **本阶段【暂不实现】、已在代码内留 `TODO(upstream-backport, ...)` 的延后项：**
-- 硅基流动 SenseVoice 可选 ASR 后端 → `transcription.py`
-- 大文件自动分段转写 → `transcription.py`（注：百炼 URL 直传可能已原生支持长音频，需先验证）
 - 服务端下载代理（带 Referer 解决 403）→ `web/app.py`、`cli.py`
+
+**已完成回迁：**
+- ✅ 硅基流动 SenseVoice 可选 ASR 后端 → `transcription.py`（CLI `--backend siliconflow`）
+- ✅ 大文件自动分段转写 → `transcription.py`（>1h 或 >50MB 自动按 9min 分段）
 
 改动上述方向前，请先阅读 `UPSTREAM_SYNC.md`。
 

@@ -29,13 +29,23 @@ pip install -e .
 
 ### API 密钥配置 (仅"提取文案"需要)
 
-文案提取使用阿里云百炼 API, 需要设置环境变量:
+文案提取支持两种后端:
+
+**百炼后端(默认):** 阿里云百炼 API, URL 直传, 无需本地 ffmpeg:
 
 ```bash
 export DASHSCOPE_API_KEY="your-dashscope-api-key"
 ```
 
 获取 API 密钥: https://help.aliyun.com/zh/model-studio/get-api-key
+
+**SiliconFlow 后端(可选):** 硅基流动 SenseVoice, 需要本地 ffmpeg, 支持大文件自动分段:
+
+```bash
+export SILICONFLOW_API_KEY="your-siliconflow-api-key"
+```
+
+获取 API 密钥: https://cloud.siliconflow.cn/
 
 > 链接解析、资源下载均无需 API 密钥; 仅"提取文案"需要.
 
@@ -52,8 +62,11 @@ python scripts/media_cli.py --link "分享链接" --action info
 # 下载视频或图集到指定目录
 python scripts/media_cli.py --link "分享链接" --action download --output ./output
 
-# 提取视频文案并保存为 Markdown (需要 DASHSCOPE_API_KEY)
+# 提取视频文案并保存为 Markdown (默认百炼, 需要 DASHSCOPE_API_KEY)
 python scripts/media_cli.py --link "分享链接" --action extract --output ./output
+
+# 使用硅基流动后端提取文案 (需要 SILICONFLOW_API_KEY + 本地 ffmpeg)
+python scripts/media_cli.py --link "分享链接" --action extract --output ./output --backend siliconflow
 
 # 提取文案并同时保存视频
 python scripts/media_cli.py --link "分享链接" --action extract --output ./output --save-video
@@ -111,7 +124,9 @@ output/
 ### 提取视频文案
 
 1. 解析链接得到无水印视频直链
-2. 调用阿里云百炼 (paraformer-v2) 进行语音识别(URL 直传, 无需本地下载)
+2. 调用转写后端进行语音识别:
+   - **百炼(默认):** paraformer-v2, URL 直传, 无需本地下载
+   - **SiliconFlow:** 下载视频 → 提取音频 → 大文件自动分段(>1h/>50MB) → 逐段上传转写
 3. 返回识别文本, 可保存为 Markdown
 
 ## 常见问题
@@ -124,7 +139,8 @@ output/
 
 ### 提取文案失败
 
-- 检查 `DASHSCOPE_API_KEY` 环境变量是否已设置且有效
+- 检查 `DASHSCOPE_API_KEY`(百炼)或 `SILICONFLOW_API_KEY`(硅基流动)环境变量是否已设置且有效
+- 使用 SiliconFlow 后端时需确保本地已安装 ffmpeg
 - 文案提取仅支持视频类型(图文笔记无音频可转写)
 
 ### 下载失败 / 403
