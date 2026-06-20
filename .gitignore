@@ -47,3 +47,5 @@ htmlcov/
 .claude
 temp/
 .venv/
+douyin-mcp-server-origin/*
+/douyin-mcp-server-origin/
